@@ -9,7 +9,8 @@ Serwer dla oryginalnego Gadu-Gadu 6.0/6.1, oparty na [projekcie macbury](https:/
 Względem pierwotnego projektu macbury:
 
 - **Naprawione doręczanie offline:** trwała kolejka, kolejność, większe partie po zalogowaniu, poprawne flagi i formatowanie, brak ponownego wysyłania przy zwykłym relogowaniu; zapis przed potwierdzeniem.
-- **Obrazki w rozmowach prywatnych (0.5.0):** klasyczny tryb GG6, transfer na żądanie od zalogowanego nadawcy, części binarne, kontrola rozmiaru i CRC32. Serwer nie przechowuje trwałych kopii obrazków.
+- **Konferencje GG6 (0.6.0):** zachowanie listy uczestników w rozmowach grupowych, również w kolejce offline, przy formatowaniu tekstu i obrazkach. Odpowiedzi zachowują kontekst grupy, a serwer nie powiela wysyłki wykonywanej przez klienta.
+- **Obrazki (0.6.0):** klasyczny tryb GG6 w rozmowach prywatnych i konferencjach, transfer na żądanie od zalogowanego nadawcy, części binarne, kontrola rozmiaru i CRC32. Serwer nie przechowuje trwałych kopii obrazków.
 - **Kontakty i prywatność:** trwały import/eksport listy, dodawanie/usuwanie obserwacji, blokady przed dostarczeniem pierwszej wiadomości, poprawiona niewidoczność i tryb „tylko znajomi”.
 - **Sesje i protokół:** bezpieczne zastępowanie starego połączenia, poprawione bitmaski, obsługa rozszerzeń i odrzucanie niepełnych/przerośniętych ramek.
 - **Nowa rejestracja WWW:** wybór wolnego numeru 1–16777215 albo kolejne numery od 112233; zaproszenia po 3 udane rejestracje, trwałe liczniki i atomowa obsługa równoczesnych prób.
@@ -27,7 +28,7 @@ Względem pierwotnego projektu macbury:
 5. Alternatywnie zainstaluj oryginalne GG 6.1 i użyj „Patchera” na **gg.exe z folderu instalacji**, nie na instalatorze. Domena musi mieć najwyżej 16 znaków ASCII. Patcher działa lokalnie w przeglądarce.
 6. W komunikatorze wybierz istniejący numer i wpisz numer oraz hasło zarejestrowane na tym serwerze.
 
-Numery z oficjalnej sieci GG nie są automatycznie kontami na tym serwerze. Rejestracja wewnątrz starego klienta, katalog publiczny, odzyskiwanie hasła e-mailem, DCC i obrazki w konferencjach nie są obsługiwane.
+Numery z oficjalnej sieci GG nie są automatycznie kontami na tym serwerze. Rejestracja wewnątrz starego klienta, katalog publiczny, odzyskiwanie hasła e-mailem i DCC nie są obsługiwane.
 
 **GG6 przesyła rozmowy bez szyfrowania i używa starego mechanizmu uwierzytelniania.** HTTPS chroni rejestrację, ale nie rozmowy. Używaj osobnego hasła i nie przesyłaj poufnych danych.
 
@@ -58,7 +59,7 @@ Gotowy instalator zachowuje zachowanie i kreator oryginalnego GG 6.1; nie jest n
 
 ## Obrazki w klasycznym GG
 
-Obsługa obrazków w rozmowach dwóch osób korzysta z opisu [protokołu libgadu, sekcje 1.6.2.2 i 1.6.3](https://libgadu.github.io/protocol/). Wiadomość niesie położenie obrazka, rozmiar i CRC32; osobne pakiety z pustym tekstem przenoszą żądanie i dane binarne. Implementacja jest własna, napisana na podstawie specyfikacji. Nie wymaga DCC ani dodatkowych portów.
+Obsługa obrazków korzysta z opisu [protokołu libgadu, sekcje 1.6.2.2 i 1.6.3](https://libgadu.github.io/protocol/). Wiadomość niesie położenie obrazka, rozmiar i CRC32; osobne pakiety z pustym tekstem przenoszą żądanie i dane binarne. Implementacja jest własna, napisana na podstawie specyfikacji. Nie wymaga DCC ani dodatkowych portów.
 
 **Pierwsze pobranie wymaga zalogowanego nadawcy, którego klient nadal ma obrazek.** Odbiorca wysyła żądanie, a serwer przekazuje je nadawcy. Dane są składane i sprawdzane w pamięci, przesyłane wyłącznie do sesji, która ich zażądała, po czym bufor jest zwalniany. Serwer nie pobiera obrazków z wyprzedzeniem, nie przechowuje ich w SQLite ani w plikach i nie ponawia żądań automatycznie po ponownym zalogowaniu nadawcy.
 
@@ -75,7 +76,15 @@ Limity w tej wersji:
 
 Kopie bazy obejmują tekst i identyfikatory obrazków, ale nie ich zawartość. Nie ma publicznych adresów HTTP do pobierania obrazków. Serwer nie dekoduje ani nie konwertuje grafiki: format, który potrafi wyświetlić dany klient, zależy od klienta.
 
-Testy TCP potwierdzają wymianę PNG/BMP, wiele fragmentów, zachowanie kolejki opisów po restarcie, brak automatycznego pobierania i kopii serwerowych, izolację kont, limity i błędne transfery. **Interfejs oryginalnego GG 6.0/6.1 wymaga jeszcze próby ręcznej przed wdrożeniem** — dostępność przycisku wysyłania do osoby offline i ponawianie pobierania zależą od klienta.
+Testy TCP potwierdzają wymianę PNG/BMP, wiele fragmentów, zachowanie kolejki opisów po restarcie, brak automatycznego pobierania i kopii serwerowych, izolację kont, limity i błędne transfery. Testy automatyczne nie obejmują interaktywnego interfejsu oryginalnego GG 6.0/6.1 — dostępność przycisku wysyłania do osoby offline i ponawianie pobierania zależą od klienta.
+
+## Konferencje GG6
+
+Klient GG wysyła osobny pakiet do każdego uczestnika, z listą pozostałych osób w atrybutach wiadomości. Serwer zachowuje tę listę i przekazuje pakiet wyłącznie wskazanemu adresatowi; ponowna wysyłka do całej listy powodowałaby duplikaty. To format opisany w sekcji 1.6.1 [protokołu libgadu](https://libgadu.github.io/protocol/).
+
+Obsługiwane są grupy do **20 osób** (nadawca, adresat i do 18 innych uczestników), wiadomości offline, polskie znaki, formatowanie oraz obrazki. Po restarcie wiadomość nadal zawiera kontekst konferencji. Lista nie stanowi potwierdzenia, że pozostałe osoby odebrały wiadomość lub dołączyły do rozmowy — konferencje GG6 nie mają zarządzanych przez serwer pokoi ani zaproszeń do pokoju.
+
+Każde doręczenie podlega zwykłym blokadom i limitom kolejki. Samo wymienienie kogoś w liście nie wysyła mu wiadomości ani nie daje dostępu do obrazka; prawo pobrania powstaje dopiero dla faktycznego adresata osobnej, zaakceptowanej wiadomości. Odrzucane są duplikaty numerów, nieprawidłowe długości, zbyt duże listy i wymienienie nadawcy lub adresata jako dodatkowej osoby. Wyjściowy pakiet umieszcza informacje o konferencji przed formatowaniem, zgodnie z GG6.
 
 ## Budowanie i testy
 
@@ -87,6 +96,7 @@ cargo test --locked --workspace
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/wire_integration.py
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/registration_integration.py
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/images_integration.py
+GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/conferences_integration.py
 node tests/patcher.test.cjs
 python3 tests/client_package_test.py
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/downloads_integration.py
@@ -103,7 +113,7 @@ Testy integracyjne tworzą wyłącznie tymczasową bazę i fikcyjne konta. Obejm
 Przykłady znajdują się w [deploy](deploy). Nie zawierają haseł ani kluczy. `advertised_ip` musi być publicznym IPv4, pod którym router przekierowuje TCP 8074. `hostname` służy stronie i patcherowi; `public_scheme` powinno być `https`.
 
 1. Zbuduj binarkę Linux amd64 i przygotuj katalog budowania z plikiem `gg-retro` i `deploy/Dockerfile.runtime`.
-2. Zbuduj obraz: `docker build -f Dockerfile.runtime -t gg-retro:0.5.0 .`.
+2. Zbuduj obraz: `docker build -f Dockerfile.runtime -t gg-retro:0.6.0 .`.
 3. W `/opt/gg-retro` umieść `compose.yaml`, konfigurację z `config.example.toml` oraz katalogi `data` i `secrets`.
 4. Wygeneruj kryptograficznie losowe **32 surowe bajty** do `secrets/password.key` i pulę kodów: `python3 deploy/generate_invites.py --count 100 --output secrets/registration-invite.txt`. Nie zapisuj ich w Git ani w logach. Katalog `secrets` powinien być dostępny tylko administratorowi, a montowane pliki czytelne dla UID 10001; `data` musi należeć do UID/GID 10001.
 5. W `.env` ustaw `GG_BIND_IP` na IP hosta Containers i opcjonalnie `GG_RETRO_IMAGE`. Domyślne wiązanie portów to bezpieczny loopback.
@@ -118,7 +128,9 @@ Kontener nie działa jako root, ma system plików tylko do odczytu, usunięte ca
 
 Wersja upstream przechowywała hasła jawnie. GG6 wymaga odzyskania hasła do obliczenia odpowiedzi na losowe wyzwanie, dlatego fork stosuje XChaCha20-Poly1305 z osobnym kluczem i powiązaniem szyfrogramu z numerem konta. Utrata klucza uniemożliwia logowanie; kopia samej bazy nie wystarcza. Wiadomości, identyfikatory obrazków i kontakty są przechowywane w bazie i wymagają ochrony uprawnień plików/kopii.
 
-Wersja 0.5.0 dodaje migracje `20261030020000_images.sql` i `20261030030000_classicImages.sql`, bez zmiany opublikowanych wcześniej migracji. Końcowa tabela `message_images` zawiera tylko identyfikator wiadomości, rozmiar i CRC32. Druga migracja usuwa kolumny zawartości i nazwy pliku ze wcześniejszej eksperymentalnej wersji gałęzi, zachowując uprawnienia. Dawne kopie tej wersji eksperymentalnej mogą nadal zawierać obrazki. Przed aktualizacją zachowaj spójną kopię bazy i klucza. Przy wycofaniu wersji przywróć bazę sprzed migracji (późniejsze wiadomości i rejestracje zostaną wtedy cofnięte); nie uruchamiaj starszej binarki na nowym schemacie.
+Wersja 0.6.0 dodaje migracje `20261030020000_images.sql` i `20261030030000_classicImages.sql`, bez zmiany opublikowanych wcześniej migracji. Końcowa tabela `message_images` zawiera tylko identyfikator wiadomości, rozmiar i CRC32. Druga migracja usuwa kolumny zawartości i nazwy pliku ze wcześniejszej eksperymentalnej wersji gałęzi, zachowując uprawnienia. Dawne kopie tej wersji eksperymentalnej mogą nadal zawierać obrazki. Przed aktualizacją zachowaj spójną kopię bazy i klucza. Przy wycofaniu wersji przywróć bazę sprzed migracji (późniejsze wiadomości i rejestracje zostaną wtedy cofnięte); nie uruchamiaj starszej binarki na nowym schemacie.
+
+Migracja `20261030040000_conferences.sql` dodaje do wiadomości opcjonalną kolumnę z listą uczestników. Istniejące wiadomości prywatne zachowują treść i nie stają się konferencjami. Przy aktualizacji z 0.4.2 wykonywane są wszystkie trzy nowe migracje. Przed otwarciem nowej wersji dla użytkowników sprawdź migrację na spójnej kopii bazy; nie przywracaj automatycznie starej kopii po przyjęciu nowych wiadomości lub rejestracji.
 
 Przed migracją istniejącej bazy wykonaj jej pełną, spójną kopię. Uruchomienie z `migrate_plaintext_passwords = true` jednorazowo szyfruje stare hasła w transakcji, wykonuje VACUUM i czyści WAL. Potem wyłącz tę opcję. Bez niej serwer odmawia uruchomienia na jawnych hasłach. Nie można cofnąć się do upstream na zmigrowanej bazie bez przywrócenia kopii sprzed migracji.
 

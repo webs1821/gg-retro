@@ -11,7 +11,8 @@ mod notify;
 
 pub use login::GGLogin60;
 pub use message::{
-  GGRecvMessage, GGSendMessage, GGSendMessageAck, RgbColor, RichTextFormat, RichTextFormats,
+  GGRecvMessage, GGSendMessage, GGSendMessageAck, MAX_CONFERENCE_RECIPIENTS, RgbColor,
+  RichTextFormat, RichTextFormats, conference_valid, decode_conference, encode_conference,
 };
 pub use notify::{
   ContactEntry, ContactList, ContactStatus, ContactStatuses, ContactType, NewStatus, UinFlag,

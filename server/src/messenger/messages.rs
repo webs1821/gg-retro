@@ -105,13 +105,19 @@ impl MessageDispatcher {
     incoming: GGSendMessage,
   ) -> Result<AckStatus, RepositoryError> {
     let users = UserRepository::new(&self.db_pool);
-    if incoming.message.len() > 8192 || !users.exists(incoming.recipient).await? {
+    if incoming.message.len() > 8192
+      || !gg_protocol::packets::conference_valid(&incoming.recipients)
+      || incoming.recipients.contains(&sender)
+      || incoming.recipients.contains(&incoming.recipient)
+      || !users.exists(incoming.recipient).await?
+    {
       return Ok(AckStatus::NotDelivered);
     }
     let online = self.sessions.lock().contains_key(&incoming.recipient);
     let class = GGMessageClass::try_from((incoming.class.bits() & !1) | u32::from(!online))
       .unwrap_or_default();
     let message = GGRecvMessage {
+      recipients: incoming.recipients,
       sender,
       seq: incoming.seq,
       class,

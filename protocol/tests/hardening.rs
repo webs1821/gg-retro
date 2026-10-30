@@ -56,6 +56,7 @@ fn extensions_and_trailing_bytes_cannot_consume_the_next_frame() {
 fn queued_chat_flags_and_friends_only_are_preserved() {
   let class = GGMessageClass::try_from(9).unwrap();
   let message = GGPacket::SendMessage(GGSendMessage {
+    recipients: Vec::new(),
     recipient: 1,
     seq: 2,
     class,

@@ -4,9 +4,10 @@
 //! Supports rich text formatting, colors, and inline image descriptors.
 
 use super::ImageId;
+use crate::GGError;
 use crate::codec_helpers::{decode_richtext_formatting, encode_richtext_formatting};
 use crate::consts::{AckStatus, GGMessageClass, GGNumber, font};
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 
 /// RGB color for text formatting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -191,6 +192,8 @@ impl TryFrom<&[u8]> for RichTextFormats {
 /// Send message packet (C → S).
 #[derive(Debug, Clone, PartialEq)]
 pub struct GGSendMessage {
+  /// Other conference participants, excluding sender and this packet's recipient.
+  pub recipients: Vec<GGNumber>,
   /// Recipient user number.
   pub recipient: GGNumber,
   /// Sequence number for tracking acknowledgments.
@@ -206,6 +209,8 @@ pub struct GGSendMessage {
 /// Receive message packet (S → C).
 #[derive(Debug, Clone, PartialEq)]
 pub struct GGRecvMessage {
+  /// Other conference participants, excluding sender and this packet's recipient.
+  pub recipients: Vec<GGNumber>,
   /// Sender user number.
   pub sender: GGNumber,
   /// Sequence number.
@@ -229,4 +234,46 @@ pub struct GGSendMessageAck {
   pub recipient: GGNumber,
   /// Sequence number (matches the sent message).
   pub seq: u32,
+}
+
+/// At most twenty people including sender and this packet's destination.
+pub const MAX_CONFERENCE_RECIPIENTS: usize = 18;
+pub fn conference_valid(recipients: &[GGNumber]) -> bool {
+  recipients.len() <= MAX_CONFERENCE_RECIPIENTS
+    && recipients
+      .iter()
+      .enumerate()
+      .all(|(i, id)| (1..=0x00ff_ffff).contains(id) && !recipients[..i].contains(id))
+}
+pub fn encode_conference(recipients: &[GGNumber]) -> Result<BytesMut, GGError> {
+  if !conference_valid(recipients) {
+    return Err(GGError::InvalidFrame("invalid conference participants"));
+  }
+  let mut data = BytesMut::new();
+  if !recipients.is_empty() {
+    data.put_u8(1);
+    data.put_u32_le(recipients.len() as u32);
+    for id in recipients {
+      data.put_u32_le(*id);
+    }
+  }
+  Ok(data)
+}
+pub fn decode_conference(data: &[u8]) -> Result<Vec<GGNumber>, GGError> {
+  let invalid = || GGError::InvalidFrame("invalid conference participants");
+  if data.len() < 5 || data[0] != 1 {
+    return Err(invalid());
+  }
+  let count = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+  if count > MAX_CONFERENCE_RECIPIENTS || data.len() != 5 + count * 4 {
+    return Err(invalid());
+  }
+  let ids: Vec<_> = data[5..]
+    .chunks_exact(4)
+    .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    .collect();
+  if !conference_valid(&ids) {
+    return Err(invalid());
+  }
+  Ok(ids)
 }

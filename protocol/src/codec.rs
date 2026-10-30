@@ -9,6 +9,7 @@ use crate::packets::{
   GGLogin60, GGPacket, GGRecvImage, GGRecvMessage, GGSendImage, GGSendMessage, GGSendMessageAck,
   ImageTransfer, NewStatus,
 };
+use crate::packets::{MAX_CONFERENCE_RECIPIENTS, decode_conference, encode_conference};
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -219,6 +220,10 @@ impl Encoder<GGPacket> for GGCodec {
       }
 
       GGPacket::SendMessage(msg) => {
+        if msg.recipients.contains(&msg.recipient) {
+          return Err(GGError::InvalidFrame("conference includes endpoint"));
+        }
+        let conference = encode_conference(&msg.recipients)?;
         let mut payload = BytesMut::new();
         payload.put_u32_le(msg.recipient);
         payload.put_u32_le(msg.seq);
@@ -227,7 +232,8 @@ impl Encoder<GGPacket> for GGCodec {
         payload.put_slice(&msg_bytes);
         payload.put_u8(0); // null terminator
 
-        // Append rich text formatting if present
+        payload.extend_from_slice(&conference);
+        // Conference attributes precede rich text in GG6.
         if let Some(ref formats) = msg.formatting {
           if !formats.is_empty() {
             let richtext_data = encode_richtext_formatting(formats);
@@ -241,6 +247,10 @@ impl Encoder<GGPacket> for GGCodec {
       }
 
       GGPacket::RecvMessage(msg) => {
+        if msg.recipients.contains(&msg.sender) {
+          return Err(GGError::InvalidFrame("conference includes endpoint"));
+        }
+        let conference = encode_conference(&msg.recipients)?;
         let mut payload = BytesMut::new();
         payload.put_u32_le(msg.sender);
         payload.put_u32_le(msg.seq);
@@ -250,7 +260,8 @@ impl Encoder<GGPacket> for GGCodec {
         payload.put_slice(&msg_bytes);
         payload.put_u8(0); // null terminator
 
-        // Append rich text formatting if present
+        payload.extend_from_slice(&conference);
+        // Conference attributes precede rich text in GG6.
         if let Some(ref formats) = msg.formatting {
           if !formats.is_empty() {
             let richtext_data = encode_richtext_formatting(formats);
@@ -467,7 +478,7 @@ impl Decoder for GGCodec {
             let class_raw = src.get_u32_le();
             let class = GGMessageClass::try_from(class_raw).unwrap_or_default();
 
-            let (message, formatting, image) = decode_message_body(src)?;
+            let (message, formatting, recipients, image) = decode_message_body(src)?;
             if let Some(transfer) = image {
               return Ok(Some(GGPacket::SendImage(GGSendImage {
                 recipient,
@@ -477,7 +488,11 @@ impl Decoder for GGCodec {
               })));
             }
 
+            if recipients.contains(&recipient) {
+              return Err(GGError::InvalidFrame("conference includes endpoint"));
+            }
             return Ok(Some(GGPacket::SendMessage(GGSendMessage {
+              recipients,
               recipient,
               seq,
               class,
@@ -577,7 +592,7 @@ impl Decoder for GGCodec {
         let class_raw = src.get_u32_le();
         let class = GGMessageClass::try_from(class_raw).unwrap_or_default();
 
-        let (message, formatting, image) = decode_message_body(src)?;
+        let (message, formatting, recipients, image) = decode_message_body(src)?;
         if let Some(transfer) = image {
           return Ok(Some(GGPacket::RecvImage(GGRecvImage {
             sender,
@@ -588,7 +603,11 @@ impl Decoder for GGCodec {
           })));
         }
 
+        if recipients.contains(&sender) {
+          return Err(GGError::InvalidFrame("conference includes endpoint"));
+        }
         return Ok(Some(GGPacket::RecvMessage(GGRecvMessage {
+          recipients,
           sender,
           seq,
           time,
@@ -623,6 +642,7 @@ fn decode_message_body(
   (
     String,
     Option<Vec<crate::packets::RichTextFormat>>,
+    Vec<u32>,
     Option<ImageTransfer>,
   ),
   GGError,
@@ -633,28 +653,54 @@ fn decode_message_body(
     .ok_or(GGError::InvalidFrame("unterminated message"))?;
   let message = decode_cp1250(&src[..end]);
   src.advance(end + 1);
-  match src.first().copied() {
-    Some(4..=6) => {
-      if !message.is_empty() {
-        return Err(GGError::InvalidFrame("image transfer must have empty text"));
-      }
-      Ok((message, None, Some(ImageTransfer::decode(src)?)))
+  if matches!(src.first(), Some(4..=6)) {
+    if !message.is_empty() {
+      return Err(GGError::InvalidFrame("image transfer must have empty text"));
     }
-    Some(2) => {
-      let formatting = decode_richtext_formatting(src, src.len())
-        .ok_or(GGError::InvalidFrame("invalid rich text attributes"))?;
-      Ok((
-        message,
-        if formatting.is_empty() {
-          None
-        } else {
-          Some(formatting)
-        },
-        None,
-      ))
-    }
-    _ => Ok((message, None, None)),
+    return Ok((message, None, vec![], Some(ImageTransfer::decode(src)?)));
   }
+  let mut recipients = vec![];
+  let mut formatting = None;
+  let mut seen_conference = false;
+  let mut seen_formatting = false;
+  while let Some(flag) = src.first().copied() {
+    match flag {
+      1 => {
+        if seen_conference || src.len() < 5 {
+          return Err(GGError::InvalidFrame("invalid conference block"));
+        }
+        let count = u32::from_le_bytes(src[1..5].try_into().unwrap()) as usize;
+        if count > MAX_CONFERENCE_RECIPIENTS || src.len() < 5 + count * 4 {
+          return Err(GGError::InvalidFrame("invalid conference length"));
+        }
+        recipients = decode_conference(&src.split_to(5 + count * 4))?;
+        seen_conference = true;
+      }
+      2 => {
+        if seen_formatting || src.len() < 3 {
+          return Err(GGError::InvalidFrame("invalid rich text block"));
+        }
+        let length = u16::from_le_bytes(src[1..3].try_into().unwrap()) as usize + 3;
+        if src.len() < length {
+          return Err(GGError::InvalidFrame("invalid rich text length"));
+        }
+        let mut block = src.split_to(length);
+        let formats = decode_richtext_formatting(&mut block, length)
+          .ok_or(GGError::InvalidFrame("invalid rich text attributes"))?;
+        if !formats.is_empty() {
+          formatting = Some(formats);
+        }
+        seen_formatting = true;
+      }
+      4..=6 => {
+        return Err(GGError::InvalidFrame(
+          "image control cannot carry conversation attributes",
+        ));
+      }
+      _ => break, // Unknown extensions have no length contract; never guess the next block boundary.
+    }
+  }
+  Ok((message, formatting, recipients, None))
 }
 
 #[cfg(test)]
@@ -904,6 +950,7 @@ mod tests {
     let mut codec = GGCodec::server();
 
     let msg = GGSendMessage {
+      recipients: Vec::new(),
       recipient: 12345,
       seq: 1,
       class: GGMessageClass::Chat,
@@ -925,6 +972,7 @@ mod tests {
     let mut codec = GGCodec::default();
 
     let msg = GGRecvMessage {
+      recipients: Vec::new(),
       sender: 54321,
       seq: 42,
       time: 1234567890,
@@ -966,6 +1014,7 @@ mod tests {
     let mut codec = GGCodec::server();
 
     let msg = GGSendMessage {
+      recipients: Vec::new(),
       recipient: 12345,
       seq: 2,
       class: GGMessageClass::Chat,
@@ -1012,6 +1061,7 @@ mod tests {
 
     let decoded = codec.decode(&mut input);
     let expected = GGPacket::SendMessage(GGSendMessage {
+      recipients: Vec::new(),
       recipient: 12345,
       seq: 1,
       class: GGMessageClass::Chat,
@@ -1030,6 +1080,7 @@ mod tests {
 
     // Message "Hello" with bold formatting at position 0
     let msg = GGSendMessage {
+      recipients: Vec::new(),
       recipient: 12345,
       seq: 1,
       class: GGMessageClass::Chat,
@@ -1054,6 +1105,7 @@ mod tests {
 
     // Message "Hello World" with bold "Hello" and colored "World"
     let msg = GGRecvMessage {
+      recipients: Vec::new(),
       sender: 54321,
       seq: 42,
       time: 1234567890,
@@ -1090,6 +1142,7 @@ mod tests {
     let mut codec = GGCodec::server();
 
     let msg = GGSendMessage {
+      recipients: Vec::new(),
       recipient: 12345,
       seq: 1,
       class: GGMessageClass::Msg,

@@ -85,6 +85,7 @@ mod tests {
   }
   fn message(size: u32, crc32: u32) -> GGRecvMessage {
     GGRecvMessage {
+      recipients: Vec::new(),
       sender: 1,
       seq: 1,
       time: 0,

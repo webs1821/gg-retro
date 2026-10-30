@@ -3,7 +3,7 @@
 use crate::models::RepositoryError;
 use gg_protocol::GGNumber;
 use gg_protocol::consts::GGMessageClass;
-use gg_protocol::packets::{GGRecvMessage, RichTextFormats};
+use gg_protocol::packets::{GGRecvMessage, RichTextFormats, decode_conference, encode_conference};
 use sqlx::{FromRow, Pool, Sqlite};
 use tracing::instrument;
 
@@ -28,6 +28,8 @@ pub struct QueuedMessage {
   pub message: String,
   /// Rich text formatting (raw protocol bytes, NULL if none).
   pub formatting: Option<Vec<u8>>,
+  /// Serialized conference option; NULL for one-to-one conversations.
+  pub conference: Option<Vec<u8>>,
   /// When the message was stored.
   pub created_at: Option<String>,
   /// When the message was delivered (NULL if pending).
@@ -45,6 +47,11 @@ impl Into<GGRecvMessage> for QueuedMessage {
       .filter(|f| !f.is_empty());
 
     GGRecvMessage {
+      recipients: self
+        .conference
+        .as_deref()
+        .and_then(|data| decode_conference(data).ok())
+        .unwrap_or_default(),
       sender: self.sender_uin,
       seq: self.seq,
       time: self.time,
@@ -87,10 +94,17 @@ impl MessageRepository {
       .filter(|f| !f.is_empty())
       .map(|f| Vec::<u8>::from(RichTextFormats::from(f.as_slice())));
 
+    let conference =
+      encode_conference(&msg.recipients).map_err(|_| RepositoryError::MailboxFull)?;
+    let conference = if conference.is_empty() {
+      None
+    } else {
+      Some(conference.to_vec())
+    };
     let mut tx = self.pool.begin().await?;
     let result = sqlx::query_as::<_, QueuedMessage>(
-      "INSERT INTO messages (recipient_uin, sender_uin, seq, time, class, message, formatting) \
-       SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT count(*) FROM messages WHERE recipient_uin = ? AND delivered_at IS NULL) < 1000 AND (SELECT count(*) FROM messages) < 50000 RETURNING *"
+      "INSERT INTO messages (recipient_uin, sender_uin, seq, time, class, message, formatting, conference) \
+       SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE (SELECT count(*) FROM messages WHERE recipient_uin = ? AND delivered_at IS NULL) < 1000 AND (SELECT count(*) FROM messages) < 50000 RETURNING *"
     )
       .bind(recipient)
       .bind(msg.sender)
@@ -99,6 +113,7 @@ impl MessageRepository {
       .bind(msg.class.bits())
       .bind(&msg.message)
       .bind(&formatting_bytes)
+      .bind(&conference)
       .bind(recipient)
       .fetch_optional(&mut *tx)
       .await?
@@ -253,6 +268,7 @@ mod tests {
 
   fn create_test_message(sender: u32, message: &str) -> GGRecvMessage {
     GGRecvMessage {
+      recipients: Vec::new(),
       sender,
       seq: 1,
       time: 1234567890,

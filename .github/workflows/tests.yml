@@ -20,6 +20,8 @@ jobs:
         run: GG_RETRO_BINARY="$PWD/target/debug/gg-retro" python3 tests/registration_integration.py
       - name: Classic image relay, online sender requirement, privacy and limits
         run: GG_RETRO_BINARY="$PWD/target/debug/gg-retro" python3 tests/images_integration.py
+      - name: GG6 conferences, offline delivery and per-recipient image grants
+        run: GG_RETRO_BINARY="$PWD/target/debug/gg-retro" python3 tests/conferences_integration.py
       - run: node tests/patcher.test.cjs
       - name: Original installer rebuild and input validation
         run: python3 tests/client_package_test.py
