@@ -12,6 +12,7 @@ use tracing::instrument;
 #[derive(Debug, Clone, Default)]
 pub struct UserPresence {
   pub uin: GGNumber,
+  pub image_size: u8,
   pub status: GGStatus,
   /// Status description (optional, max 70 characters).
   pub description: Option<String>,
@@ -41,6 +42,7 @@ impl From<GGLogin60> for UserPresence {
   fn from(value: GGLogin60) -> Self {
     Self {
       uin: value.uin,
+      image_size: value.image_size,
       status: value.status,
       time: value.time,
       description: value.description,
@@ -63,7 +65,7 @@ impl From<UserPresence> for ContactStatus {
       remote_ip: Ipv4Addr::new(0, 0, 0, 0), // No direct connection info
       remote_port: 0,
       version: GG_VERSION_60 as u8,
-      image_size: 0, // No image support
+      image_size: presence.image_size,
       description: presence.description,
       time: presence.time,
     }
@@ -187,6 +189,14 @@ impl PresenceHub {
     }
   }
 
+  pub fn is_blocked(&self, uin: GGNumber, other: GGNumber) -> bool {
+    self
+      .books
+      .read()
+      .get(&uin)
+      .is_some_and(|book| book.is_blocked(other))
+  }
+
   fn unsubscribe_all(&self, uin: GGNumber) {
     self.observers.write().retain(|_, watchers| {
       watchers.remove(&uin);
@@ -213,6 +223,7 @@ mod tests {
     UserPresence {
       uin,
       status: GGStatus::Avail,
+      image_size: 64,
       description: None,
       time: None,
     }

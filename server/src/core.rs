@@ -65,6 +65,7 @@ pub struct AppState {
   config: ServerConfig,
   vault: PasswordVault,
   pub admission: Arc<Admission>,
+  pub images: crate::messenger::images::ImageService,
   pub client_downloads: Option<crate::downloads::ClientDownloads>,
 }
 impl AppState {
@@ -151,6 +152,7 @@ pub async fn create_app_state() -> Result<SharedAppState, Box<dyn std::error::Er
   };
   let message_dispatcher = MessageDispatcher::new(&db_pool);
   Ok(Arc::new(AppState {
+    images: crate::messenger::images::ImageService::new(&db_pool),
     db_pool,
     client_downloads,
     host_ip,

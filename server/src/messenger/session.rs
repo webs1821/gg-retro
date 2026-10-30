@@ -1,4 +1,6 @@
+use super::images::{Begin, ImageEvent};
 use super::{MessagesStream, PresenceChangeStream, UserPresence, contact_book::ContactBook};
+use crate::models::images::{self, OfferedImage};
 use crate::{
   core::SharedAppState,
   models::{MessageRepository, UserRepository},
@@ -7,6 +9,10 @@ use futures::{SinkExt, StreamExt};
 use gg_protocol::{
   GGCodec, GGError, GGNumber, GGPacket,
   packets::{ContactEntry, GGSendMessageAck},
+};
+use gg_protocol::{
+  consts::{AckStatus, GGMessageClass},
+  packets::{GGRecvImage, GGSendImage, ImageId, ImageTransfer, MAX_IMAGE_OPTION_BYTES},
 };
 use rand::Rng;
 use std::time::{Duration, Instant};
@@ -28,6 +34,9 @@ pub struct UserSessionController {
   registration: Option<u64>,
   delivery_guard: Option<OwnedMutexGuard<()>>,
   contacts_ready: bool,
+  image_events: Option<tokio_stream::wrappers::ReceiverStream<ImageEvent>>,
+  image_size: u8,
+  last_image_prefetch: Option<Instant>,
 }
 #[derive(Error, Debug)]
 pub enum UserSessionError {
@@ -62,6 +71,9 @@ impl UserSessionController {
       registration: None,
       delivery_guard: None,
       contacts_ready: false,
+      image_events: None,
+      image_size: 0,
+      last_image_prefetch: None,
     }
   }
   async fn send(&mut self, packet: GGPacket) -> Result<(), UserSessionError> {
@@ -94,6 +106,7 @@ impl UserSessionController {
       let password = self.app_state.vault().open(&user.password, user.uin)?;
       if bool::from(gg_protocol::gg_login_hash(&password, self.seed).ct_eq(&login.hash)) {
         self.uin = Some(login.uin);
+        self.image_size = login.image_size;
         self.initial_presence = Some(login.into());
         return Ok(());
       }
@@ -103,9 +116,11 @@ impl UserSessionController {
   }
   pub async fn sync(&mut self) -> Result<(), UserSessionError> {
     let uin = self.uin.ok_or(UserSessionError::Authentication)?;
-    let (id, messages, replaced, guard) = self.app_state.message_dispatcher().register(uin).await;
+    let (id, messages, image_events, replaced, guard) =
+      self.app_state.message_dispatcher().register(uin).await;
     self.registration = Some(id);
     self.messages = Some(messages);
+    self.image_events = Some(image_events);
     self.replaced = replaced;
     self.delivery_guard = Some(guard);
     if self.replaced.is_cancelled() {
@@ -134,6 +149,11 @@ impl UserSessionController {
         let id = message.id;
         if !self.contacts.is_blocked(message.sender_uin) {
           self.send(GGPacket::RecvMessage(message.into())).await?;
+        } else {
+          sqlx::query("DELETE FROM message_images WHERE message_id=?")
+            .bind(id)
+            .execute(self.app_state.db_pool())
+            .await?;
         }
         // Each successful socket write is recorded separately; GG6 has no receipt ACK.
         messages.mark_single_delivered(id).await?;
@@ -222,6 +242,7 @@ impl UserSessionController {
     let mut rate_window = Instant::now();
     let mut packet_count = 0u32;
     let mut message_count = 0u32;
+    let mut image_requests = 0u32;
     loop {
       tokio::select! {
           _ = self.shutdown.cancelled() => break,
@@ -229,8 +250,11 @@ impl UserSessionController {
           _ = poll.tick() => {
               if last_packet.elapsed() > Duration::from_secs(300) { return Err(UserSessionError::Timeout); }
               self.deliver_pending().await?;
+              for (target,event) in self.app_state.images.expire() { self.app_state.message_dispatcher().image_event(target,event); }
+              self.prefetch_images().await?;
           }
           Some(()) = self.messages.as_mut().unwrap().next() => self.deliver_pending().await?,
+          Some(event) = self.image_events.as_mut().unwrap().next(), if self.contacts_ready => self.image_event(event).await?,
           Some(other) = self.presence_changes.as_mut().unwrap().next() => {
               let status = self.app_state.presence_hub().find_for(other, uin);
               self.send(GGPacket::Status60(status.into())).await?;
@@ -238,17 +262,28 @@ impl UserSessionController {
           packet = self.protocol.next() => {
               let packet = packet.ok_or(UserSessionError::Closed)??;
               last_packet = Instant::now();
-              if rate_window.elapsed() >= Duration::from_secs(60) { rate_window = Instant::now(); packet_count = 0; message_count = 0; }
+              if rate_window.elapsed() >= Duration::from_secs(60) { rate_window = Instant::now(); packet_count = 0; message_count = 0; image_requests = 0; }
               packet_count += 1;
               if packet_count > 600 { return Err(UserSessionError::Limit); }
               match packet {
                   GGPacket::Ping => self.send(GGPacket::Pong).await?,
+                  GGPacket::SendImage(message) => {
+                      if matches!(message.transfer,ImageTransfer::Request(_)) {
+                          image_requests += 1;
+                          if image_requests > 20 { return Err(UserSessionError::Limit); }
+                      }
+                      self.image_message(message).await?;
+                  }
                   GGPacket::SendMessage(message) => {
                       message_count += 1;
                       if message_count > 300 { return Err(UserSessionError::Limit); }
                       let recipient = message.recipient; let seq = message.seq;
+                      let image_ids=images::descriptors(message.formatting.as_deref());
                       let status = self.app_state.message_dispatcher().dispatch(uin, message).await?;
                       self.send(GGPacket::SendMessageAck(GGSendMessageAck { recipient, seq, status })).await?;
+                      if status == AckStatus::Queued {
+                          for id in image_ids {self.start_image_fetch(uin,recipient,id,None).await?;}
+                      }
                   }
                   GGPacket::ListEmpty => {
                       contacts.clear(); self.contacts.set(&[]);
@@ -271,7 +306,7 @@ impl UserSessionController {
                   }
                   GGPacket::NewStatus(status) => {
                       if status.description.as_ref().is_some_and(|d| d.chars().count() > 70) { return Err(UserSessionError::Limit); }
-                      self.app_state.presence_hub().notify(UserPresence { uin, status: status.status, description: status.description, time: status.time });
+                      self.app_state.presence_hub().notify(UserPresence { uin, image_size: self.app_state.presence_hub().find(&uin).image_size, status: status.status, description: status.description, time: status.time });
                   }
                   GGPacket::UserListRequest { kind, data } => self.user_list(kind, data).await?,
                   GGPacket::Disconnect => break,
@@ -285,10 +320,330 @@ impl UserSessionController {
   }
   pub async fn cleanup(&mut self) {
     if let (Some(uin), Some(id)) = (self.uin, self.registration.take()) {
+      for (target, event) in self.app_state.images.disconnect(uin, id) {
+        self
+          .app_state
+          .message_dispatcher()
+          .image_event(target, event);
+      }
       // Still holding the account delivery guard: successor cannot publish presence yet.
       self.app_state.presence_hub().unregister(uin, &[]);
       self.app_state.message_dispatcher().unregister(uin, id);
     }
     self.delivery_guard.take();
+  }
+
+  fn images_blocked(&self, owner: u32, recipient: u32) -> bool {
+    self.app_state.presence_hub().is_blocked(owner, recipient)
+      || self.app_state.presence_hub().is_blocked(recipient, owner)
+  }
+  async fn start_image_fetch(
+    &self,
+    owner: u32,
+    recipient: u32,
+    id: ImageId,
+    waiter: Option<u64>,
+  ) -> Result<bool, UserSessionError> {
+    if self.images_blocked(owner, recipient) {
+      return Ok(false);
+    }
+    match images::lookup(self.app_state.db_pool(), owner, recipient, id).await? {
+      OfferedImage::Ready(_) => {
+        return Ok(waiter.is_none_or(|request_session| {
+          self.app_state.message_dispatcher().image_event(
+            recipient,
+            ImageEvent::Ready {
+              owner,
+              id,
+              request_session,
+            },
+          )
+        }));
+      }
+      OfferedImage::Missing => return Ok(false),
+      OfferedImage::Pending => {}
+    }
+    let Some(owner_session) = self.app_state.message_dispatcher().session_id(owner) else {
+      return Ok(false);
+    };
+    match self
+      .app_state
+      .images
+      .begin(owner, recipient, id, owner_session, waiter)
+    {
+      Begin::Existing => Ok(true),
+      Begin::Full => Ok(false),
+      Begin::New => {
+        if let Err(error) = images::attempted(self.app_state.db_pool(), owner, recipient, id).await
+        {
+          self
+            .app_state
+            .images
+            .cancel(owner, recipient, id, owner_session);
+          return Err(error.into());
+        }
+        if self.app_state.message_dispatcher().image_event(
+          owner,
+          ImageEvent::Request {
+            recipient,
+            id,
+            owner_session,
+          },
+        ) {
+          Ok(true)
+        } else {
+          self
+            .app_state
+            .images
+            .cancel(owner, recipient, id, owner_session);
+          Ok(false)
+        }
+      }
+    }
+  }
+  async fn prefetch_images(&mut self) -> Result<(), UserSessionError> {
+    if !self.contacts_ready
+      || self
+        .last_image_prefetch
+        .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
+    {
+      return Ok(());
+    }
+    self.last_image_prefetch = Some(Instant::now());
+    let owner = self.uin.ok_or(UserSessionError::Authentication)?;
+    for (recipient, id) in images::pending(self.app_state.db_pool(), owner).await? {
+      self.start_image_fetch(owner, recipient, id, None).await?;
+    }
+    Ok(())
+  }
+  async fn send_image(
+    &mut self,
+    owner: u32,
+    transfer: ImageTransfer,
+  ) -> Result<(), UserSessionError> {
+    self
+      .send(GGPacket::RecvImage(GGRecvImage {
+        sender: owner,
+        seq: 0,
+        time: std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .unwrap_or_default()
+          .as_secs() as u32,
+        class: GGMessageClass::Msg,
+        transfer,
+      }))
+      .await
+  }
+  async fn image_ack(
+    &mut self,
+    message: &GGSendImage,
+    status: AckStatus,
+  ) -> Result<(), UserSessionError> {
+    if message.class.bits() & GGMessageClass::Ack.bits() == 0 {
+      self
+        .send(GGPacket::SendMessageAck(GGSendMessageAck {
+          recipient: message.recipient,
+          seq: message.seq,
+          status,
+        }))
+        .await?;
+    }
+    Ok(())
+  }
+  async fn image_message(&mut self, message: GGSendImage) -> Result<(), UserSessionError> {
+    let uin = self.uin.ok_or(UserSessionError::Authentication)?;
+    let session = self.registration.ok_or(UserSessionError::Authentication)?;
+    let id = message.transfer.id();
+    if !self.contacts_ready || self.images_blocked(uin, message.recipient) {
+      if !matches!(message.transfer, ImageTransfer::Request(_)) {
+        if let Some((target, event)) =
+          self
+            .app_state
+            .images
+            .cancel(uin, message.recipient, id, session)
+        {
+          self
+            .app_state
+            .message_dispatcher()
+            .image_event(target, event);
+        }
+      }
+      self.image_ack(&message, AckStatus::Blocked).await?;
+      if matches!(message.transfer, ImageTransfer::Request(_)) {
+        self
+          .send_image(message.recipient, ImageTransfer::unavailable(id))
+          .await?;
+      }
+      return Ok(());
+    }
+    if matches!(message.transfer, ImageTransfer::Request(_)) {
+      let offered = if id.size <= u32::from(self.image_size) * 1024 {
+        images::lookup(self.app_state.db_pool(), message.recipient, uin, id).await?
+      } else {
+        OfferedImage::Missing
+      };
+      match offered {
+        OfferedImage::Missing => {
+          self.image_ack(&message, AckStatus::NotDelivered).await?;
+          self
+            .send_image(message.recipient, ImageTransfer::unavailable(id))
+            .await?;
+        }
+        OfferedImage::Ready(image) => {
+          self.image_ack(&message, AckStatus::Delivered).await?;
+          self.send_cached_image(message.recipient, id, image).await?;
+        }
+        OfferedImage::Pending => {
+          let accepted = self
+            .start_image_fetch(message.recipient, uin, id, Some(session))
+            .await?;
+          self
+            .image_ack(
+              &message,
+              if accepted {
+                AckStatus::Delivered
+              } else {
+                AckStatus::NotDelivered
+              },
+            )
+            .await?;
+          if !accepted {
+            self
+              .send_image(message.recipient, ImageTransfer::unavailable(id))
+              .await?;
+          }
+        }
+      }
+    } else {
+      let (status, notification) = self
+        .app_state
+        .images
+        .receive(uin, message.recipient, session, message.transfer.clone())
+        .await?;
+      if let Some((recipient, event)) = notification {
+        self
+          .app_state
+          .message_dispatcher()
+          .image_event(recipient, event);
+      }
+      self.image_ack(&message, status).await?;
+      if !self
+        .app_state
+        .images
+        .expecting(uin, message.recipient, id, session)
+      {
+        self.last_image_prefetch = None;
+      }
+    }
+    Ok(())
+  }
+  async fn image_event(&mut self, event: ImageEvent) -> Result<(), UserSessionError> {
+    match event {
+      ImageEvent::Request {
+        recipient,
+        id,
+        owner_session,
+      } => {
+        let owner = self.uin.ok_or(UserSessionError::Authentication)?;
+        if !self
+          .app_state
+          .images
+          .expecting(owner, recipient, id, owner_session)
+        {
+          return Ok(());
+        }
+        if self.registration == Some(owner_session) && !self.images_blocked(owner, recipient) {
+          self
+            .send_image(recipient, ImageTransfer::Request(id))
+            .await?;
+        } else if let Some((target, event)) =
+          self
+            .app_state
+            .images
+            .cancel(owner, recipient, id, owner_session)
+        {
+          self
+            .app_state
+            .message_dispatcher()
+            .image_event(target, event);
+        }
+      }
+      ImageEvent::Ready {
+        owner,
+        id,
+        request_session,
+      } => {
+        let recipient = self.uin.ok_or(UserSessionError::Authentication)?;
+        if self.registration == Some(request_session) && !self.images_blocked(owner, recipient) {
+          match images::lookup(self.app_state.db_pool(), owner, recipient, id).await? {
+            OfferedImage::Ready(image) => self.send_cached_image(owner, id, image).await?,
+            _ => {
+              self
+                .send_image(owner, ImageTransfer::unavailable(id))
+                .await?
+            }
+          }
+        } else if self.registration == Some(request_session) {
+          self
+            .send_image(owner, ImageTransfer::unavailable(id))
+            .await?;
+        }
+      }
+      ImageEvent::Unavailable {
+        owner,
+        id,
+        request_session,
+      } => {
+        if self.registration == Some(request_session) {
+          self
+            .send_image(owner, ImageTransfer::unavailable(id))
+            .await?;
+        }
+      }
+    }
+    Ok(())
+  }
+  async fn send_cached_image(
+    &mut self,
+    owner: u32,
+    id: ImageId,
+    image: images::CachedImage,
+  ) -> Result<(), UserSessionError> {
+    if id.size > u32::from(self.image_size) * 1024
+      || image.data.len() != id.size as usize
+      || crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC).checksum(&image.data) != id.crc32
+    {
+      return self.send_image(owner, ImageTransfer::unavailable(id)).await;
+    }
+    let start = Instant::now();
+    let mut offset = 0;
+    while offset < image.data.len() {
+      if self.replaced.is_cancelled() || self.shutdown.is_cancelled() {
+        return Err(UserSessionError::Closed);
+      }
+      if start.elapsed() > Duration::from_secs(30) {
+        return Err(UserSessionError::Timeout);
+      }
+      let first = offset == 0;
+      let capacity = MAX_IMAGE_OPTION_BYTES - 9 - if first { image.filename.len() + 1 } else { 0 };
+      let end = (offset + capacity).min(image.data.len());
+      self
+        .send_image(
+          owner,
+          ImageTransfer::Reply {
+            id,
+            first,
+            filename: if first {
+              Some(image.filename.clone())
+            } else {
+              None
+            },
+            data: image.data[offset..end].to_vec(),
+          },
+        )
+        .await?;
+      offset = end;
+    }
+    Ok(())
   }
 }

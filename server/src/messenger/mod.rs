@@ -3,6 +3,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 mod contact_book;
+pub mod images;
 mod messages;
 mod presence;
 mod session;

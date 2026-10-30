@@ -87,6 +87,7 @@ impl MessageRepository {
       .filter(|f| !f.is_empty())
       .map(|f| Vec::<u8>::from(RichTextFormats::from(f.as_slice())));
 
+    let mut tx = self.pool.begin().await?;
     let result = sqlx::query_as::<_, QueuedMessage>(
       "INSERT INTO messages (recipient_uin, sender_uin, seq, time, class, message, formatting) \
        SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT count(*) FROM messages WHERE recipient_uin = ? AND delivered_at IS NULL) < 1000 AND (SELECT count(*) FROM messages) < 50000 RETURNING *"
@@ -99,9 +100,12 @@ impl MessageRepository {
       .bind(&msg.message)
       .bind(&formatting_bytes)
       .bind(recipient)
-      .fetch_optional(&self.pool)
+      .fetch_optional(&mut *tx)
       .await?
       .ok_or(RepositoryError::MailboxFull)?;
+    let ids = super::images::descriptors(msg.formatting.as_deref());
+    super::images::reserve(&mut tx, result.id, msg.sender, recipient, &ids).await?;
+    tx.commit().await?;
 
     tracing::debug!(
       id = result.id,

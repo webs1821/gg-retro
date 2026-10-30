@@ -1,3 +1,4 @@
+use super::images::ImageEvent;
 use crate::models::{DatabasePool, MessageRepository, RepositoryError, UserRepository};
 use gg_protocol::{
   GGNumber,
@@ -20,6 +21,7 @@ pub type MessagesStream = ReceiverStream<()>;
 struct Registration {
   id: u64,
   notify: mpsc::Sender<()>,
+  images: mpsc::Sender<ImageEvent>,
   stop: CancellationToken,
   delivery: Arc<Mutex<()>>,
 }
@@ -41,9 +43,16 @@ impl MessageDispatcher {
   pub async fn register(
     &self,
     uin: GGNumber,
-  ) -> (u64, MessagesStream, CancellationToken, OwnedMutexGuard<()>) {
+  ) -> (
+    u64,
+    MessagesStream,
+    ReceiverStream<ImageEvent>,
+    CancellationToken,
+    OwnedMutexGuard<()>,
+  ) {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel(1);
+    let (image_tx, image_rx) = mpsc::channel(32);
     let stop = CancellationToken::new();
     let delivery = {
       let mut sessions = self.sessions.lock();
@@ -58,6 +67,7 @@ impl MessageDispatcher {
         Registration {
           id,
           notify: tx,
+          images: image_tx,
           stop: stop.clone(),
           delivery: delivery.clone(),
         },
@@ -65,13 +75,29 @@ impl MessageDispatcher {
       delivery
     };
     let guard = delivery.lock_owned().await;
-    (id, ReceiverStream::new(rx), stop, guard)
+    (
+      id,
+      ReceiverStream::new(rx),
+      ReceiverStream::new(image_rx),
+      stop,
+      guard,
+    )
   }
   pub fn unregister(&self, uin: GGNumber, id: u64) {
     let mut sessions = self.sessions.lock();
     if sessions.get(&uin).is_some_and(|s| s.id == id) {
       sessions.remove(&uin);
     }
+  }
+  pub fn session_id(&self, uin: GGNumber) -> Option<u64> {
+    self.sessions.lock().get(&uin).map(|s| s.id)
+  }
+  pub fn image_event(&self, uin: GGNumber, event: ImageEvent) -> bool {
+    self
+      .sessions
+      .lock()
+      .get(&uin)
+      .is_some_and(|s| s.images.try_send(event).is_ok())
   }
   pub async fn dispatch(
     &self,

@@ -926,7 +926,7 @@ version = "0.1.0"
 
 [[package]]
 name = "gg-server"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "ab_glyph",
  "askama",
@@ -934,6 +934,7 @@ dependencies = [
  "axum-embed",
  "base64",
  "chacha20poly1305",
+ "crc",
  "figment",
  "futures",
  "gg-protocol",

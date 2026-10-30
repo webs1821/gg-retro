@@ -6,7 +6,8 @@ use crate::codec_helpers::{
 use crate::consts::{AckStatus, GGMessageClass, GGStatus, packet_type};
 use crate::error::GGError;
 use crate::packets::{
-  GGLogin60, GGPacket, GGRecvMessage, GGSendMessage, GGSendMessageAck, NewStatus,
+  GGLogin60, GGPacket, GGRecvImage, GGRecvMessage, GGSendImage, GGSendMessage, GGSendMessageAck,
+  ImageTransfer, NewStatus,
 };
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
@@ -47,6 +48,27 @@ impl Encoder<GGPacket> for GGCodec {
 
   fn encode(&mut self, item: GGPacket, dst: &mut BytesMut) -> Result<(), Self::Error> {
     match item {
+      GGPacket::SendImage(image) => {
+        let option = image.transfer.encode()?;
+        dst.put_u32_le(packet_type::GG_SEND_MSG);
+        dst.put_u32_le((13 + option.len()) as u32);
+        dst.put_u32_le(image.recipient);
+        dst.put_u32_le(image.seq);
+        dst.put_u32_le(image.class.bits());
+        dst.put_u8(0);
+        dst.extend_from_slice(&option);
+      }
+      GGPacket::RecvImage(image) => {
+        let option = image.transfer.encode()?;
+        dst.put_u32_le(packet_type::GG_RECV_MSG);
+        dst.put_u32_le((17 + option.len()) as u32);
+        dst.put_u32_le(image.sender);
+        dst.put_u32_le(image.seq);
+        dst.put_u32_le(image.time);
+        dst.put_u32_le(image.class.bits());
+        dst.put_u8(0);
+        dst.extend_from_slice(&option);
+      }
       GGPacket::AddNotify(entry) => {
         dst.put_u32_le(0x0d);
         dst.put_u32_le(5);
@@ -445,36 +467,15 @@ impl Decoder for GGCodec {
             let class_raw = src.get_u32_le();
             let class = GGMessageClass::try_from(class_raw).unwrap_or_default();
 
-            // Remaining bytes are message content (null-terminated) + optional formatting
-            let remaining = length.saturating_sub(12);
-            let (message, formatting) = if remaining > 0 {
-              let msg_end = src
-                .iter()
-                .take(remaining)
-                .position(|&b| b == 0)
-                .unwrap_or(remaining);
-              let msg = decode_cp1250(&src[..msg_end]);
-              src.advance(msg_end);
-
-              // Calculate bytes remaining after message (including null terminator)
-              let bytes_after_msg = remaining.saturating_sub(msg_end);
-
-              let formatting = if bytes_after_msg > 1 {
-                // Skip null terminator
-                src.advance(1);
-                // Parse rich text formatting from remaining bytes
-                decode_richtext_formatting(src, bytes_after_msg - 1)
-              } else {
-                if bytes_after_msg == 1 {
-                  src.advance(1); // Skip null terminator
-                }
-                None
-              };
-
-              (msg, formatting)
-            } else {
-              (String::new(), None)
-            };
+            let (message, formatting, image) = decode_message_body(src)?;
+            if let Some(transfer) = image {
+              return Ok(Some(GGPacket::SendImage(GGSendImage {
+                recipient,
+                seq,
+                class,
+                transfer,
+              })));
+            }
 
             return Ok(Some(GGPacket::SendMessage(GGSendMessage {
               recipient,
@@ -576,36 +577,16 @@ impl Decoder for GGCodec {
         let class_raw = src.get_u32_le();
         let class = GGMessageClass::try_from(class_raw).unwrap_or_default();
 
-        // Remaining bytes are message content (null-terminated) + optional formatting
-        let remaining = length.saturating_sub(16);
-        let (message, formatting) = if remaining > 0 {
-          let msg_end = src
-            .iter()
-            .take(remaining)
-            .position(|&b| b == 0)
-            .unwrap_or(remaining);
-          let msg = decode_cp1250(&src[..msg_end]);
-          src.advance(msg_end);
-
-          // Calculate bytes remaining after message (including null terminator)
-          let bytes_after_msg = remaining.saturating_sub(msg_end);
-
-          let formatting = if bytes_after_msg > 1 {
-            // Skip null terminator
-            src.advance(1);
-            // Parse rich text formatting from remaining bytes
-            decode_richtext_formatting(src, bytes_after_msg - 1)
-          } else {
-            if bytes_after_msg == 1 {
-              src.advance(1); // Skip null terminator
-            }
-            None
-          };
-
-          (msg, formatting)
-        } else {
-          (String::new(), None)
-        };
+        let (message, formatting, image) = decode_message_body(src)?;
+        if let Some(transfer) = image {
+          return Ok(Some(GGPacket::RecvImage(GGRecvImage {
+            sender,
+            seq,
+            time,
+            class,
+            transfer,
+          })));
+        }
 
         return Ok(Some(GGPacket::RecvMessage(GGRecvMessage {
           sender,
@@ -633,6 +614,46 @@ impl Decoder for GGCodec {
 
       _ => Ok(Some(GGPacket::Unknown { packet_type })),
     }
+  }
+}
+
+fn decode_message_body(
+  src: &mut BytesMut,
+) -> Result<
+  (
+    String,
+    Option<Vec<crate::packets::RichTextFormat>>,
+    Option<ImageTransfer>,
+  ),
+  GGError,
+> {
+  let end = src
+    .iter()
+    .position(|b| *b == 0)
+    .ok_or(GGError::InvalidFrame("unterminated message"))?;
+  let message = decode_cp1250(&src[..end]);
+  src.advance(end + 1);
+  match src.first().copied() {
+    Some(4..=6) => {
+      if !message.is_empty() {
+        return Err(GGError::InvalidFrame("image transfer must have empty text"));
+      }
+      Ok((message, None, Some(ImageTransfer::decode(src)?)))
+    }
+    Some(2) => {
+      let formatting = decode_richtext_formatting(src, src.len())
+        .ok_or(GGError::InvalidFrame("invalid rich text attributes"))?;
+      Ok((
+        message,
+        if formatting.is_empty() {
+          None
+        } else {
+          Some(formatting)
+        },
+        None,
+      ))
+    }
+    _ => Ok((message, None, None)),
   }
 }
 
@@ -1048,6 +1069,7 @@ mod tests {
           italic: false,
           underline: false,
           color: Some(RgbColor::new(255, 0, 0)),
+          image: None,
         },
       ]),
     };
@@ -1078,6 +1100,7 @@ mod tests {
         italic: true,
         underline: true,
         color: None,
+        image: None,
       }]),
     };
     let packet = GGPacket::SendMessage(msg);

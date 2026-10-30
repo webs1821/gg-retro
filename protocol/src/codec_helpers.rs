@@ -1,7 +1,7 @@
 //! Helper functions for GG protocol codec encoding/decoding.
 
 use crate::consts::{font, status_has_description};
-use crate::packets::{ContactEntry, ContactStatus, ContactType, RgbColor, RichTextFormat};
+use crate::packets::{ContactEntry, ContactStatus, ContactType, ImageId, RgbColor, RichTextFormat};
 use bytes::{Buf, BufMut, BytesMut};
 use encoding_rs::WINDOWS_1250;
 use std::borrow::Cow;
@@ -188,6 +188,11 @@ pub fn encode_richtext_formatting(formats: &[RichTextFormat]) -> BytesMut {
       data.put_u8(color.g);
       data.put_u8(color.b);
     }
+    if let Some(image) = fmt.image {
+      data.put_slice(&[9, 1]);
+      data.put_u32_le(image.size);
+      data.put_u32_le(image.crc32);
+    }
   }
 
   data
@@ -199,73 +204,48 @@ pub fn decode_richtext_formatting(
   src: &mut BytesMut,
   remaining: usize,
 ) -> Option<Vec<RichTextFormat>> {
-  if remaining < 3 {
+  if remaining < 3 || remaining > src.len() || src[0] != 2 {
     return None;
   }
-
-  // Check for richtext flag
-  if src[0] != 0x02 {
-    // Not rich text, skip remaining bytes
-    src.advance(remaining);
+  let length = u16::from_le_bytes([src[1], src[2]]) as usize;
+  if length + 3 != remaining {
     return None;
   }
-
-  src.advance(1); // Skip flag byte
-
-  let formats_len = src.get_u16_le() as usize;
-  if formats_len == 0 || formats_len > remaining - 3 {
-    // Skip any remaining bytes
-    if remaining > 3 {
-      src.advance(remaining - 3);
-    }
-    return None;
-  }
-
+  src.advance(3);
   let mut formats = Vec::new();
-  let mut bytes_read = 0;
-
-  while bytes_read + 3 <= formats_len && src.len() >= 3 {
+  while !src.is_empty() {
+    if src.len() < 3 {
+      return None;
+    }
     let position = src.get_u16_le();
-    let font_byte = src.get_u8();
-    bytes_read += 3;
-
-    let color = if (font_byte & font::GG_FONT_COLOR) != 0
-      && src.len() >= 3
-      && bytes_read + 3 <= formats_len
-    {
-      let r = src.get_u8();
-      let g = src.get_u8();
-      let b = src.get_u8();
-      bytes_read += 3;
-      Some(RgbColor::new(r, g, b))
+    let flags = src.get_u8();
+    if flags & !0x8f != 0 {
+      return None;
+    }
+    let color = if flags & font::GG_FONT_COLOR != 0 {
+      if src.len() < 3 {
+        return None;
+      }
+      Some(RgbColor::new(src.get_u8(), src.get_u8(), src.get_u8()))
     } else {
       None
     };
-
-    // Skip image data if present (we don't handle images yet)
-    if (font_byte & font::GG_FONT_IMAGE) != 0 {
-      // Image format: 2 bytes unknown + 4 bytes size + 4 bytes crc32 = 10 bytes
-      if bytes_read + 10 <= formats_len && src.len() >= 10 {
-        src.advance(10);
-        bytes_read += 10;
+    let mut format = RichTextFormat::from_font_byte(position, flags, color);
+    if flags & font::GG_FONT_IMAGE != 0 {
+      if src.len() < 10 || src[0] != 9 || src[1] != 1 {
+        return None;
       }
-      continue;
+      src.advance(2);
+      let image = ImageId {
+        size: src.get_u32_le(),
+        crc32: src.get_u32_le(),
+      };
+      if !image.valid() {
+        return None;
+      }
+      format.image = Some(image);
     }
-
-    formats.push(RichTextFormat::from_font_byte(position, font_byte, color));
+    formats.push(format);
   }
-
-  // Skip any remaining unread bytes
-  if bytes_read < formats_len {
-    let skip = formats_len - bytes_read;
-    if src.len() >= skip {
-      src.advance(skip);
-    }
-  }
-
-  if formats.is_empty() {
-    None
-  } else {
-    Some(formats)
-  }
+  Some(formats)
 }

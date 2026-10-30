@@ -1,11 +1,12 @@
 //! Message packets for GG protocol.
 //!
 //! These packets are used to send and receive messages between users.
-//! Supports rich text formatting including bold, italic, underline, and color.
+//! Supports rich text formatting, colors, and inline image descriptors.
 
+use super::ImageId;
+use crate::codec_helpers::{decode_richtext_formatting, encode_richtext_formatting};
+use crate::consts::{AckStatus, GGMessageClass, GGNumber, font};
 use bytes::BytesMut;
-use crate::consts::{font, AckStatus, GGNumber, GGMessageClass};
-use crate::codec_helpers::{encode_richtext_formatting, decode_richtext_formatting};
 
 /// RGB color for text formatting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -37,6 +38,8 @@ pub struct RichTextFormat {
   pub underline: bool,
   /// Text color (if Some, the color is applied).
   pub color: Option<RgbColor>,
+  /// Inline image descriptor; image data travels in separate messages.
+  pub image: Option<ImageId>,
 }
 
 impl RichTextFormat {
@@ -92,6 +95,7 @@ impl RichTextFormat {
       italic: (font_byte & font::GG_FONT_ITALIC) != 0,
       underline: (font_byte & font::GG_FONT_UNDERLINE) != 0,
       color,
+      image: None,
     }
   }
 
@@ -110,12 +114,15 @@ impl RichTextFormat {
     if self.color.is_some() {
       byte |= font::GG_FONT_COLOR;
     }
+    if self.image.is_some() {
+      byte |= font::GG_FONT_IMAGE;
+    }
     byte
   }
 
-  /// Returns the size of this format entry when encoded (3 or 6 bytes).
+  /// Three base bytes, optionally three color bytes and ten image bytes.
   pub fn encoded_size(&self) -> usize {
-    if self.color.is_some() { 6 } else { 3 }
+    3 + if self.color.is_some() { 3 } else { 0 } + if self.image.is_some() { 10 } else { 0 }
   }
 }
 
@@ -223,4 +230,3 @@ pub struct GGSendMessageAck {
   /// Sequence number (matches the sent message).
   pub seq: u32,
 }
-

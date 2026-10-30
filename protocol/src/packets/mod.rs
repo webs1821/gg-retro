@@ -1,6 +1,11 @@
 //! GG protocol packet types.
 
+mod image;
 mod login;
+pub use image::{
+  GGRecvImage, GGSendImage, ImageId, ImageTransfer, MAX_IMAGE_BYTES, MAX_IMAGE_FILENAME_BYTES,
+  MAX_IMAGE_OPTION_BYTES,
+};
 mod message;
 mod notify;
 
@@ -14,6 +19,8 @@ pub use notify::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GGPacket {
+  SendImage(GGSendImage),
+  RecvImage(GGRecvImage),
   AddNotify(ContactEntry),
   RemoveNotify(ContactEntry),
   UserListRequest {
