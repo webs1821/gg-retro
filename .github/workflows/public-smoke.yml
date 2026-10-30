@@ -14,4 +14,4 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - run: python3 tests/public_smoke.py
+      - run: python3 tests/public_smoke.py --config deploy/site.toml

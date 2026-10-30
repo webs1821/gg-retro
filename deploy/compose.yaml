@@ -1,6 +1,6 @@
 services:
   gg-retro:
-    image: ${GG_RETRO_IMAGE:-gg-retro:0.4.1}
+    image: ${GG_RETRO_IMAGE:-gg-retro:0.4.2}
     container_name: gg-retro
     restart: unless-stopped
     read_only: true
@@ -20,6 +20,7 @@ services:
       - "${GG_BIND_IP:-127.0.0.1}:8074:8074"
     volumes:
       - ./data:/data
+      - ./downloads:/app/downloads:ro
       - ./config.toml:/app/config.toml:ro
       - ./secrets/password.key:/run/secrets/password.key:ro
       - ./secrets/registration-invite.txt:/run/secrets/registration-invite.txt:ro

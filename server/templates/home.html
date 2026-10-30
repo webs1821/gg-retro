@@ -106,7 +106,7 @@
         </form>
         <p id="registerStatus" role="status"></p>
         <h2>Po rejestracji</h2>
-        <ol><li>Zainstaluj GG 6.1 z zakładki „Pobierz”.</li><li>W zakładce „Patcher” wybierz plik <strong>gg.exe z katalogu instalacji</strong>, nie instalator gg61.exe. Zapisz zmodyfikowaną kopię w tym samym katalogu.</li><li>Uruchom zmodyfikowany plik. Wybierz istniejący numer i wpisz otrzymany tutaj numer oraz hasło.</li></ol>
+        <ol><li>W zakładce „Pobierz” wybierz gotowy instalator albo skorzystaj z instrukcji instalacji ręcznej.</li><li>Uruchom komunikator. Wybierz istniejący numer i wpisz numer otrzymany tutaj oraz swoje hasło.</li></ol>
         <p>Wiadomości do nieobecnej osoby czekają na serwerze i przychodzą po jej zalogowaniu. E-mail służy identyfikacji konta; automatyczne odzyskiwanie hasła nie jest dostępne.</p>
       </div>
 
@@ -116,7 +116,7 @@
         <p>To narzędzie modyfikuje oryginalny plik wykonywalny Gadu-Gadu, aby łączył się z Twoim własnym serwerem zamiast oficjalnych serwerów GG.</p>
 
         <div class="info-box">
-          <strong>Uwaga:</strong> Patcher działa tylko z oryginalnymi plikami GG 6.0. Upewnij się, że masz kopię zapasową!
+          <strong>Uwaga:</strong> Użyj oryginalnego gg.exe z GG 6.1 udostępnionego poniżej. Zachowaj kopię oryginału.
         </div>
 
         <form id="patcherForm" onsubmit="return patchFile(event)">
@@ -139,21 +139,28 @@
       <div id="download" class="section">
         <h1>Pobierz klienta GG</h1>
 
-        <div class="feature-list">
-          <ul>
-            <li><a href="/static/gg61.exe">Gadu-Gadu 6.1</a> (mirror)</li>
-            <li><a href="https://www.dobreprogramy.pl/gadu-gadu-gg,program,windows,6628204058663041">Gadu-Gadu 6.0</a> (dobreprogramy.pl)</li>
-          </ul>
-        </div>
-
-        <div class="info-box">
-          <strong>SHA256:</strong><br>
-          <code style="font-size: 10px; word-break: break-all;">{{ gg61_sha256 }}</code>
-        </div>
-
-        <div class="info-box" style="background: #FFE0E0;">
-          <strong>Ważne:</strong> Pobrany klient GG wymaga patchowania! Oryginalny klient łączy się z oficjalnymi serwerami Gadu-Gadu. Użyj zakładki "Patcher" aby zmienić adres serwera na własny.
-        </div>
+        {% if has_installer %}
+        <h2>Gotowy instalator dla {{ hostname }}</h2>
+        <p><a class="button" href="/downloads/gg-setup.exe">Pobierz GG 6.1 — gotowy instalator</a></p>
+        <p>Oryginalny kreator GG 6.1 z klientem przygotowanym dla <strong>{{ hostname }}</strong>. Przy nowej instalacji wystarczy przejść przez kreator; ręczne patchowanie nie jest potrzebne. Jeśli masz już zainstalowane GG 6.1, możesz skorzystać z podmiany samego pliku opisanej poniżej.</p>
+        <p>SHA-256 instalatora: <code style="font-size:10px;word-break:break-all">{{ installer_sha256 }}</code></p>
+        {% endif %}
+        {% if has_client %}
+        <h2>Masz już GG 6.1? Podmień tylko gg.exe</h2>
+        <p><a class="button" href="/downloads/gg.exe">Pobierz gotowy gg.exe dla {{ hostname }}</a></p>
+        <ol>
+          <li>Zamknij Gadu-Gadu, także jego ikonę obok zegara.</li>
+          <li>Otwórz folder instalacji GG: kliknij skrót prawym przyciskiem, wybierz „Właściwości”, a następnie „Otwórz lokalizację pliku”. Zwykle jest to <code>C:\Program Files (x86)\Gadu-Gadu</code> lub <code>C:\Program Files\Gadu-Gadu</code>.</li>
+          <li>Zachowaj kopię dotychczasowego <code>gg.exe</code>, np. jako <code>gg.exe.bak</code>.</li>
+          <li>Umieść pobrany <strong>gg.exe w tym folderze instalacji</strong>, obok plików DLL i katalogów <code>emots</code> oraz <code>skins</code>. To plik programu, który zastępuje dotychczasowy gg.exe.</li>
+          <li>Uruchom ten plik z folderu instalacji; w razie potrzeby zaktualizuj skrót. Zaloguj się numerem i hasłem zarejestrowanym na tej stronie.</li>
+        </ol>
+        <p>SHA-256 gg.exe: <code style="font-size:10px;word-break:break-all">{{ client_sha256 }}</code></p>
+        {% endif %}
+        <h2>Instalacja ręczna z oryginału</h2>
+        <p><a href="/static/gg61.exe">Pobierz oryginalny instalator GG 6.1</a></p>
+        <p>Zainstaluj GG 6.1. Następnie {% if has_client %}podmień gg.exe zgodnie z instrukcją powyżej albo {% endif %}w zakładce „Patcher” wybierz <strong>gg.exe z folderu instalacji</strong> i adres <strong>{{ hostname }}</strong>. Zapisz zmodyfikowany plik w tym samym folderze i uruchom go stamtąd.</p>
+        <p>SHA-256 oryginalnego instalatora: <code style="font-size:10px;word-break:break-all">{{ gg61_sha256 }}</code></p>
 
         <h2>Dokumentacja</h2>
         <ul>

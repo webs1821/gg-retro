@@ -1,0 +1,3 @@
+# Public hostname for this fork's client build and deployment smoke test.
+# Keep runtime, backend and certificate settings in the operator's private config.toml.
+hostname = "gadu-gadu.k13.pl"

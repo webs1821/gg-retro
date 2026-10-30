@@ -4,17 +4,47 @@
 
 Serwer dla oryginalnego Gadu-Gadu 6.0/6.1, oparty na [projekcie macbury](https://github.com/macbury/gg-retro). Ten fork poprawia kolejkę offline, zgodność protokołu i wdrożenie publiczne. Licencja autora: [LICENSE](LICENSE).
 
+## Co dodano i poprawiono w tym forku
+
+Względem pierwotnego projektu macbury:
+
+- **Naprawione doręczanie offline:** trwała kolejka, kolejność, większe partie po zalogowaniu, poprawne flagi i formatowanie, brak ponownego wysyłania przy zwykłym relogowaniu; zapis przed potwierdzeniem.
+- **Kontakty i prywatność:** trwały import/eksport listy, dodawanie/usuwanie obserwacji, blokady przed dostarczeniem pierwszej wiadomości, poprawiona niewidoczność i tryb „tylko znajomi”.
+- **Sesje i protokół:** bezpieczne zastępowanie starego połączenia, poprawione bitmaski, obsługa rozszerzeń i odrzucanie niepełnych/przerośniętych ramek.
+- **Nowa rejestracja WWW:** wybór wolnego numeru 1–16777215 albo kolejne numery od 112233; zaproszenia po 3 udane rejestracje, trwałe liczniki i atomowa obsługa równoczesnych prób.
+- **Ochrona danych i usługi:** szyfrowanie haseł XChaCha20-Poly1305 z osobnym kluczem, jawna migracja starych haseł, limity połączeń/pakietów/kolejki i brak sekretów w logach.
+- **Gotowy klient i instalator:** generowane dla domeny z konfiguracji; stary kreator NSIS 2 zachowuje oryginalny skrypt, zasoby i pliki poza podmienionym gg.exe. Patcher poprawnie zachowuje końcówki URL i rozmiar EXE.
+- **Przenośne wdrożenie:** domena w TOML, generator nginx, opcjonalny katalog plików do pobrania z kontrolą domeny i SHA-256, ograniczony kontener, blokada połączeń wychodzących, spójne kopie SQLite i healthcheck.
+- **Testy i CI:** testy kodeka, sesji, rejestracji i wyścigów, prawdziwe TCP/HTTP, restart/awaria, audyt zależności, weryfikacja paczki klienta i test publicznego dostępu.
+
 ## Korzystanie z serwera
 
-1. Otwórz **https://gadu-gadu.k13.pl** i wybierz „Załóż konto”. Kod zaproszenia otrzymasz od właściciela serwera.
-2. Opcjonalnie wpisz własny wolny numer (1–16777215). Puste pole przydziela kolejne wolne numery od 112233; niższe są dostępne wyłącznie przez ręczny wybór. Zapisz przydzielony numer. Użyj osobnego hasła: 8–15 znaków ASCII, bez spacji.
-3. Zainstaluj klienta GG 6.1 z zakładki „Pobierz”.
-4. Patcherem na stronie zmodyfikuj **gg.exe z katalogu instalacji**, nie instalator `gg61.exe`. Domena `gadu-gadu.k13.pl` mieści się w polach klienta (16 znaków). Patcher działa lokalnie w przeglądarce i nie wysyła pliku na serwer.
-5. Zapisz zmodyfikowaną kopię w katalogu klienta, uruchom ją i wybierz logowanie na istniejący numer. Wpisz numer i hasło otrzymane na tej stronie.
+1. Otwórz stronę swojego serwera i wybierz „Załóż konto”. Kod zaproszenia otrzymasz od administratora.
+2. Opcjonalnie wpisz dawny, wolny numer (1–16777215). Puste pole przydziela kolejny wolny numer od 112233; niższe numery są dostępne tylko ręcznie. Użyj osobnego hasła: 8–15 znaków ASCII, bez spacji.
+3. W „Pobierz” wybierz gotowy instalator, jeśli administrator go udostępnił. W nowej instalacji nie trzeba potem patchować programu.
+4. Jeśli masz już GG 6.1, zamknij je i pobierz gotowy `gg.exe`. Otwórz folder instalacji przez właściwości skrótu, zachowaj poprzedni plik jako `gg.exe.bak`, a pobrany zapisz **w folderze instalacji, obok DLL, emots i skins**. Uruchom go stamtąd.
+5. Alternatywnie zainstaluj oryginalne GG 6.1 i użyj „Patchera” na **gg.exe z folderu instalacji**, nie na instalatorze. Domena musi mieć najwyżej 16 znaków ASCII. Patcher działa lokalnie w przeglądarce.
+6. W komunikatorze wybierz istniejący numer i wpisz numer oraz hasło zarejestrowane na tym serwerze.
 
 Numery z oficjalnej sieci GG nie są automatycznie kontami na tym serwerze. Rejestracja wewnątrz starego klienta, katalog publiczny, odzyskiwanie hasła e-mailem i DCC/obrazki nie są obsługiwane.
 
-**GG6 przesyła rozmowy bez szyfrowania i używa starego mechanizmu uwierzytelniania.** HTTPS chroni rejestrację, ale nie połączenie komunikatora. To usługa do rozmów retro, nie do przesyłania poufnych danych ani ponownego używania ważnych haseł.
+**GG6 przesyła rozmowy bez szyfrowania i używa starego mechanizmu uwierzytelniania.** HTTPS chroni rejestrację, ale nie rozmowy. Używaj osobnego hasła i nie przesyłaj poufnych danych.
+
+## Domena i gotowe pliki klienta
+
+Domena jest ustawiana przez `hostname` w konfiguracji TOML (lub `GG_HOSTNAME`). Kod serwera, testy patchera i szablon nginx nie zawierają adresu operatora. [deploy/config.example.toml](deploy/config.example.toml) zawiera neutralny przykład; [deploy/site.toml](deploy/site.toml) zawiera tylko publiczną domenę bieżącego wdrożenia webs1821, używaną do budowania klienta i testu publicznego. Osoba stawiająca własny serwer powinna przygotować własny, prywatny `config.toml` na podstawie neutralnego przykładu i ustawić w nim `hostname`, `advertised_ip`, certyfikat i adres backendu nginx.
+
+```sh
+# Python 3.11+ i Node.js; wszystkie pliki wynikowe poza Git.
+python3 tools/build_client.py --config deploy/site.toml --output dist/client
+python3 deploy/render_nginx.py --config config.toml --output dist/nginx.conf
+```
+
+Generator klienta korzysta z oryginalnego instalatora GG 6.1 o przypiętym SHA-256. Weryfikuje CRC NSIS, wyciąga oryginalny gg.exe, używa tego samego patchera co przeglądarka i zastępuje wyłącznie ten plik w strumieniu instalatora. Odtwarza długość strumienia i CRC, po czym ponownie sprawdza, że pozostała zawartość jest identyczna. Nie uruchamia żadnego EXE. Opcjonalne `--patched-exe plik.exe` pozwala użyć dostarczonego klienta, ale tylko gdy jest identyczny z oczekiwaną modyfikacją dla podanej domeny.
+
+Skopiuj wynik (`gg.exe`, `gg-setup.exe`, `manifest.toml`) do `/opt/gg-retro/downloads` i ustaw `client_downloads_dir = "/app/downloads"`. Compose montuje ten katalog tylko do odczytu. Pliki nie są osadzane w binarce serwera; zmiana domeny wymaga wygenerowania nowej paczki i restartu. Niezgodna domena lub suma kontrolna powoduje odmowę startu zamiast udostępnienia błędnego klienta. Pusta wartość wyłącza gotowe pliki i zostawia oryginalny instalator oraz patcher.
+
+Gotowy instalator zachowuje zachowanie i kreator oryginalnego GG 6.1; nie jest nowym instalatorem systemowym ani aktualizacją bibliotek klienta. Automatyczne testy sprawdzają CRC, zawartość i serwowanie paczki, a nie przebieg interaktywnej instalacji na wszystkich wersjach Windows. Prawa do klienta GG i jego zasobów pozostają przy pierwotnych autorach; licencja serwera nie zastępuje licencji klienta.
 
 ## Wiadomości i obecność
 
@@ -35,6 +65,8 @@ cargo test --locked --workspace
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/wire_integration.py
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/registration_integration.py
 node tests/patcher.test.cjs
+python3 tests/client_package_test.py
+GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/downloads_integration.py
 cargo install cargo-audit --version 0.22.2 --locked
 sh tests/check-audit-graph.sh
 ```
@@ -48,13 +80,13 @@ Testy integracyjne tworzą wyłącznie tymczasową bazę i fikcyjne konta. Obejm
 Przykłady znajdują się w [deploy](deploy). Nie zawierają haseł ani kluczy. `advertised_ip` musi być publicznym IPv4, pod którym router przekierowuje TCP 8074. `hostname` służy stronie i patcherowi; `public_scheme` powinno być `https`.
 
 1. Zbuduj binarkę Linux amd64 i przygotuj katalog budowania z plikiem `gg-retro` i `deploy/Dockerfile.runtime`.
-2. Zbuduj obraz: `docker build -f Dockerfile.runtime -t gg-retro:0.4.1 .`.
+2. Zbuduj obraz: `docker build -f Dockerfile.runtime -t gg-retro:0.4.2 .`.
 3. W `/opt/gg-retro` umieść `compose.yaml`, konfigurację z `config.example.toml` oraz katalogi `data` i `secrets`.
 4. Wygeneruj kryptograficznie losowe **32 surowe bajty** do `secrets/password.key` i pulę kodów: `python3 deploy/generate_invites.py --count 100 --output secrets/registration-invite.txt`. Nie zapisuj ich w Git ani w logach. Katalog `secrets` powinien być dostępny tylko administratorowi, a montowane pliki czytelne dla UID 10001; `data` musi należeć do UID/GID 10001.
 5. W `.env` ustaw `GG_BIND_IP` na IP hosta Containers i opcjonalnie `GG_RETRO_IMAGE`. Domyślne wiązanie portów to bezpieczny loopback.
 6. Zastosuj `egress-guard.sh` jako root i uruchamiaj go po starcie Dockera (OpenRC/systemd). Reguły dotyczą wyłącznie mostu `br-gg-retro`; zachowują odpowiedzi na połączenia przychodzące.
 7. Uruchom `docker compose up -d`. Sprawdź `/healthz` i stan kontenera.
-8. Skonfiguruj nginx według przykładu, z prawidłowym certyfikatem. Port HTTP backendu 18074 powinien być dostępny wyłącznie z routera. Publiczne TCP 8074 przekieruj na host Containers i dopuść w zaporze VM; nie kieruj go do serwera WWW. Dodaj odpowiedni hairpin NAT dla LAN/VPN.
+8. Wygeneruj konfigurację nginx przez `deploy/render_nginx.py` z tego samego pliku TOML, z prawidłowym certyfikatem. Port HTTP backendu 18074 powinien być dostępny wyłącznie z routera. Publiczne TCP 8074 przekieruj na host Containers i dopuść w zaporze VM; nie kieruj go do serwera WWW. Dodaj odpowiedni hairpin NAT dla LAN/VPN.
 9. Skonfiguruj codzienne uruchomienie `backup.py` przez root. Tworzy spójne kopie SQLite i kopiuje niezbędny klucz oraz konfigurację; zachowuje 14 ostatnich kopii. Kopie są prywatne i nie są montowane w kontenerze aplikacji.
 
 Kontener nie działa jako root, ma system plików tylko do odczytu, usunięte capabilities, limit 256 MiB i 0,5 CPU. Aplikacja ogranicza ramki, połączenia, tempo pakietów i rozmiar kolejki. nginx ogranicza rejestrację i zapisuje ścieżki bez parametrów zapytań. Sam nginx/Fail2ban dla HTTP nie chroni połączeń przekierowanych przez DNAT — ograniczenia GG działają również w aplikacji.

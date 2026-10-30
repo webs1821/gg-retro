@@ -1,7 +1,8 @@
 """Unauthenticated deployment check, intended to run outside the home LAN."""
-import socket, struct, urllib.request
-
-host = 'gadu-gadu.k13.pl'
+import socket, struct, urllib.request, argparse, pathlib, tomllib
+parser=argparse.ArgumentParser();parser.add_argument('--config',type=pathlib.Path,required=True);args=parser.parse_args()
+config=tomllib.loads(args.config.read_text(encoding='utf-8'))
+host=config['hostname']
 with urllib.request.urlopen(f'https://{host}/healthz', timeout=15) as response:
     assert response.status == 200
 with urllib.request.urlopen(f'http://{host}/appsvc/appmsg4.asp', timeout=15) as response:

@@ -20,6 +20,7 @@ pub struct ServerConfig {
   gg_port: u16,
   db: String,
   hostname: String,
+  client_downloads_dir: String,
   pub advertised_ip: Option<IpAddr>,
   pub advertised_port: u16,
   public_scheme: String,
@@ -35,6 +36,7 @@ impl Default for ServerConfig {
       gg_port: 8074,
       db: "./gg.db".into(),
       hostname: "gg-retro.local".into(),
+      client_downloads_dir: String::new(),
       advertised_ip: None,
       advertised_port: 8074,
       public_scheme: "https".into(),
@@ -63,6 +65,7 @@ pub struct AppState {
   config: ServerConfig,
   vault: PasswordVault,
   pub admission: Arc<Admission>,
+  pub client_downloads: Option<crate::downloads::ClientDownloads>,
 }
 impl AppState {
   pub fn db_pool(&self) -> &DatabasePool {
@@ -96,6 +99,7 @@ pub async fn create_app_state() -> Result<SharedAppState, Box<dyn std::error::Er
     .merge(Env::prefixed("GG_"))
     .join(Serialized::defaults(ServerConfig::default()))
     .extract()?;
+  let client_downloads = crate::downloads::load(&config.client_downloads_dir, &config.hostname)?;
   let key = Zeroizing::new(std::fs::read(&config.password_key_file)?);
   let vault = PasswordVault::new(&key)?;
   if !matches!(config.public_scheme.as_str(), "http" | "https") {
@@ -148,6 +152,7 @@ pub async fn create_app_state() -> Result<SharedAppState, Box<dyn std::error::Er
   let message_dispatcher = MessageDispatcher::new(&db_pool);
   Ok(Arc::new(AppState {
     db_pool,
+    client_downloads,
     host_ip,
     presence_hub: PresenceHub::new(),
     message_dispatcher,

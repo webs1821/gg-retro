@@ -1,6 +1,7 @@
 mod api;
 mod banner;
 mod core;
+mod downloads;
 mod messenger;
 mod models;
 mod security;

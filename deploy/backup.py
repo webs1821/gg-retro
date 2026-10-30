@@ -15,6 +15,8 @@ with sqlite3.connect(f'file:{root / "data/gg.db"}?mode=ro', uri=True) as source:
         if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise RuntimeError('SQLite backup integrity check failed')
 shutil.copytree(root / 'secrets', temporary / 'secrets')
+if (root / 'downloads').is_dir():
+    shutil.copytree(root / 'downloads', temporary / 'downloads')
 for name in ('config.toml', 'compose.yaml', '.env'):
     shutil.copy2(root / name, temporary / name)
 final = backups / ('gg-retro-' + stamp)

@@ -39,6 +39,10 @@ struct HomeTemplate<'a> {
   hostname: &'a str,
   version: &'a str,
   gg61_sha256: &'a str,
+  has_client: bool,
+  has_installer: bool,
+  client_sha256: &'a str,
+  installer_sha256: &'a str,
 }
 
 #[derive(Template)]
@@ -60,6 +64,22 @@ async fn index(
     hostname: app_state.config().hostname(),
     version: VERSION,
     gg61_sha256: GG61_SHA256,
+    has_client: app_state.client_downloads.is_some(),
+    has_installer: app_state
+      .client_downloads
+      .as_ref()
+      .is_some_and(|d| d.installer.is_some()),
+    client_sha256: app_state
+      .client_downloads
+      .as_ref()
+      .map(|d| d.client.sha256.as_str())
+      .unwrap_or(""),
+    installer_sha256: app_state
+      .client_downloads
+      .as_ref()
+      .and_then(|d| d.installer.as_ref())
+      .map(|d| d.sha256.as_str())
+      .unwrap_or(""),
   };
   Ok(Html(template.render()?))
 }
@@ -70,5 +90,40 @@ pub fn router() -> Router<SharedAppState> {
 
   Router::new()
     .route("/", get(index))
+    .route("/downloads/gg.exe", get(client_download))
+    .route("/downloads/gg-setup.exe", get(installer_download))
     .nest_service("/static", serve_assets)
+}
+
+fn download(
+  file: Option<&crate::downloads::Download>,
+  filename: &'static str,
+) -> axum::response::Response {
+  match file {
+    Some(file) => (
+      [
+        ("content-type", "application/octet-stream"),
+        ("content-disposition", filename),
+        ("x-content-type-options", "nosniff"),
+      ],
+      file.bytes.clone(),
+    )
+      .into_response(),
+    None => axum::http::StatusCode::NOT_FOUND.into_response(),
+  }
+}
+async fn client_download(State(app): State<SharedAppState>) -> axum::response::Response {
+  download(
+    app.client_downloads.as_ref().map(|d| &d.client),
+    "attachment; filename=gg.exe",
+  )
+}
+async fn installer_download(State(app): State<SharedAppState>) -> axum::response::Response {
+  download(
+    app
+      .client_downloads
+      .as_ref()
+      .and_then(|d| d.installer.as_ref()),
+    "attachment; filename=gg-retro-setup.exe",
+  )
 }

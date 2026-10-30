@@ -2,10 +2,14 @@ bind = "0.0.0.0"
 http_port = 8080
 gg_port = 8074
 db = "/data/gg.db"
-hostname = "gadu-gadu.k13.pl"
+hostname = "gg.example.org"
 public_scheme = "https"
 # Use the public IPv4 address, never the private address of a Docker bridge.
 advertised_ip = "203.0.113.10"
 advertised_port = 8074
 password_key_file = "/run/secrets/password.key"
 registration_invite_file = "/run/secrets/registration-invite.txt"
+# Optional: generated client downloads, mounted read-only. Empty disables ready-made downloads.
+client_downloads_dir = ""
+# nginx_backend = "127.0.0.1:18074"
+# tls_certificate_dir = "/etc/letsencrypt/live/gg.example.org"
