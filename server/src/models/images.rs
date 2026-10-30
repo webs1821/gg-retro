@@ -18,6 +18,10 @@ pub fn descriptors(formatting: Option<&[RichTextFormat]>) -> Vec<ImageId> {
   {
     if !ids.contains(&id) {
       ids.push(id);
+      // Keep one extra descriptor to reject the whole message; bound duplicate checks.
+      if ids.len() > MAX_IMAGES_PER_MESSAGE {
+        break;
+      }
     }
   }
   ids
