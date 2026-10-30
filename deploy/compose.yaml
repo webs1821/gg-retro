@@ -13,7 +13,7 @@ services:
     stop_grace_period: 30s
     ulimits:
       nofile: {soft: 2048, hard: 2048}
-    tmpfs: [/tmp:size=16m,mode=1777,noexec,nosuid,nodev]
+    tmpfs: ["/tmp:size=16m,mode=1777,noexec,nosuid,nodev"]
     dns: [127.0.0.1]
     ports:
       - "${GG_BIND_IP:-127.0.0.1}:18074:8080"
