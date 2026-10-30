@@ -1,6 +1,6 @@
 services:
   gg-retro:
-    image: ${GG_RETRO_IMAGE:-gg-retro:0.6.0}
+    image: ${GG_RETRO_IMAGE:-gg-retro:0.7.0}
     container_name: gg-retro
     restart: unless-stopped
     read_only: true

@@ -102,7 +102,7 @@ def hash_password(seed):
     return y
 
 class Client:
-    def __init__(self, uin, contacts=True, fragmented=False, status=2, image_size=255):
+    def __init__(self, uin, contacts=True, fragmented=False, status=2, image_size=255, description=None, return_time=None):
         self.sock = socket.create_connection(("127.0.0.1", PORT), timeout=5)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         kind, body = self.recv()
@@ -111,6 +111,9 @@ class Client:
         self.seed = seed
         payload = struct.pack("<IIIIB4sH4sHBB", uin, hash_password(seed), status,
                               0x20, 0, bytes(4), 0, bytes(4), 0, image_size, 0xbe)
+        if description is not None:
+            payload += description.encode('cp1250') + b'\0'
+            if return_time is not None: payload += struct.pack('<I', return_time)
         self.send(0x15, payload, fragmented)
         assert self.until(3)[0] == 3
         if contacts:

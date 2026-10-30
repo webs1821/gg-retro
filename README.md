@@ -8,6 +8,8 @@ Serwer dla oryginalnego Gadu-Gadu 6.0/6.1, oparty na [projekcie macbury](https:/
 
 Względem pierwotnego projektu macbury:
 
+- **Opisy offline (0.7.0):** opis „niedostępny” i opcjonalny czas powrotu są zachowywane po zamknięciu klienta oraz restarcie serwera, razem z blokadami i ustawieniami widoczności.
+- **Ponowne łączenie (0.7.0):** restart zamyka TCP bez pakietu wymuszonego wylogowania. Zmiana na „niedostępny” kończy sesję, a zalogowanie drugiego klienta nadal rozłącza poprzedni. Obecność jest publikowana dopiero po otrzymaniu listy kontaktów i prywatności.
 - **Naprawione doręczanie offline:** trwała kolejka, kolejność, większe partie po zalogowaniu, poprawne flagi i formatowanie, brak ponownego wysyłania przy zwykłym relogowaniu; zapis przed potwierdzeniem.
 - **Konferencje GG6 (0.6.0):** zachowanie listy uczestników w rozmowach grupowych, również w kolejce offline, przy formatowaniu tekstu i obrazkach. Odpowiedzi zachowują kontekst grupy, a serwer nie powiela wysyłki wykonywanej przez klienta.
 - **Obrazki (0.6.0):** klasyczny tryb GG6 w rozmowach prywatnych i konferencjach, transfer na żądanie od zalogowanego nadawcy, części binarne, kontrola rozmiaru i CRC32. Serwer nie przechowuje trwałych kopii obrazków.
@@ -57,6 +59,16 @@ Gotowy instalator zachowuje zachowanie i kreator oryginalnego GG 6.1; nie jest n
 - Ponowne logowanie zastępuje poprzednią sesję. Dostarczanie i sprzątanie sesji danego konta są serializowane.
 - Działają dodawanie/usuwanie kontaktów, import/eksport listy na serwer, blokowanie nadawcy, niewidoczność i tryb „tylko dla znajomych”. Listy eksportowane są prywatne dla konta; limit 256 KiB.
 
+## Opisy offline i ponowne łączenie
+
+W GG6 wybierz **Niedostępny z opisem**, np. „Wrócę wieczorem”. Serwer zapisze opis (do 70 znaków CP1250) oraz czas powrotu, jeśli klient go wysyła. Opis pozostaje widoczny także dla później logujących się kontaktów i przetrwa restart serwera. W tej samej operacji zapisywane są reguły prywatności: blokady, kontakty „zawsze niedostępny” i tryb „tylko znajomi”. Dane nie są wystawiane przez stronę WWW.
+
+Zwykłe „Niedostępny”, pusty opis albo kolejne poprawne logowanie usuwają poprzedni opis offline. Nie zapisujemy automatycznie opisów dostępności ani niewidoczności po utracie połączenia. Do publikacji opisu wymagamy pełnej listy kontaktów; samo uwierzytelnienie nie ujawnia jeszcze opisu obserwatorom. Opis i reguły są częścią kopii bazy.
+
+Restart (SIGTERM/SIGINT) kończy TCP w zwykły sposób. Pakiet `GG_DISCONNECTING` oznaczający wymuszone wylogowanie jest używany przy zastąpieniu sesji przez inny klient, a nie podczas prac serwisowych. To rozróżnienie pozwala klientowi ponawiać połączenie; jego harmonogram prób zależy od wersji i ustawień GG. Zmiana na niedostępny również zamyka sesję. Dla GG6 nie wysyłamy potwierdzenia rozłączenia z późniejszych wersji protokołu.
+
+Testy używają prawdziwego TCP i sprawdzają pakiety przy restarcie, ponowną autoryzację, kolejkę offline oraz prywatność przed i po restarcie. Nie zastępują ręcznego sprawdzenia automatycznego łączenia w konkretnym oryginalnym kliencie GG. Opis rozłączeń: [protokół libgadu, sekcja 1.11](https://libgadu.github.io/protocol/#ch1.11).
+
 ## Obrazki w klasycznym GG
 
 Obsługa obrazków korzysta z opisu [protokołu libgadu, sekcje 1.6.2.2 i 1.6.3](https://libgadu.github.io/protocol/). Wiadomość niesie położenie obrazka, rozmiar i CRC32; osobne pakiety z pustym tekstem przenoszą żądanie i dane binarne. Implementacja jest własna, napisana na podstawie specyfikacji. Nie wymaga DCC ani dodatkowych portów.
@@ -97,6 +109,7 @@ GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/wire_integration.py
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/registration_integration.py
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/images_integration.py
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/conferences_integration.py
+GG_RETRO_BINARY=target/debug/gg-retro python3 tests/presence_integration.py
 node tests/patcher.test.cjs
 python3 tests/client_package_test.py
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/downloads_integration.py
@@ -113,7 +126,7 @@ Testy integracyjne tworzą wyłącznie tymczasową bazę i fikcyjne konta. Obejm
 Przykłady znajdują się w [deploy](deploy). Nie zawierają haseł ani kluczy. `advertised_ip` musi być publicznym IPv4, pod którym router przekierowuje TCP 8074. `hostname` służy stronie i patcherowi; `public_scheme` powinno być `https`.
 
 1. Zbuduj binarkę Linux amd64 i przygotuj katalog budowania z plikiem `gg-retro` i `deploy/Dockerfile.runtime`.
-2. Zbuduj obraz: `docker build -f Dockerfile.runtime -t gg-retro:0.6.0 .`.
+2. Zbuduj obraz: `docker build -f Dockerfile.runtime -t gg-retro:0.7.0 .`.
 3. W `/opt/gg-retro` umieść `compose.yaml`, konfigurację z `config.example.toml` oraz katalogi `data` i `secrets`.
 4. Wygeneruj kryptograficznie losowe **32 surowe bajty** do `secrets/password.key` i pulę kodów: `python3 deploy/generate_invites.py --count 100 --output secrets/registration-invite.txt`. Nie zapisuj ich w Git ani w logach. Katalog `secrets` powinien być dostępny tylko administratorowi, a montowane pliki czytelne dla UID 10001; `data` musi należeć do UID/GID 10001.
 5. W `.env` ustaw `GG_BIND_IP` na IP hosta Containers i opcjonalnie `GG_RETRO_IMAGE`. Domyślne wiązanie portów to bezpieczny loopback.
@@ -125,6 +138,8 @@ Przykłady znajdują się w [deploy](deploy). Nie zawierają haseł ani kluczy. 
 Kontener nie działa jako root, ma system plików tylko do odczytu, usunięte capabilities, limit 256 MiB i 0,5 CPU. Aplikacja ogranicza ramki, połączenia, tempo pakietów i rozmiar kolejki. nginx ogranicza rejestrację i zapisuje ścieżki bez parametrów zapytań. Sam nginx/Fail2ban dla HTTP nie chroni połączeń przekierowanych przez DNAT — ograniczenia GG działają również w aplikacji.
 
 ### Hasła i istniejąca baza
+
+Wersja 0.7.0 dodaje migrację `20261031000000_offlinePresence.sql`: osobną tabelę opisów offline wraz z regułami widoczności. Migracja nie zmienia istniejących kont, haseł ani wiadomości. Opisy i reguły obejmuje spójna kopia SQLite; aktualizacja z 0.6.0 wykonuje tylko tę jedną nową migrację.
 
 Wersja upstream przechowywała hasła jawnie. GG6 wymaga odzyskania hasła do obliczenia odpowiedzi na losowe wyzwanie, dlatego fork stosuje XChaCha20-Poly1305 z osobnym kluczem i powiązaniem szyfrogramu z numerem konta. Utrata klucza uniemożliwia logowanie; kopia samej bazy nie wystarcza. Wiadomości, identyfikatory obrazków i kontakty są przechowywane w bazie i wymagają ochrony uprawnień plików/kopii.
 

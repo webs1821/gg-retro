@@ -205,11 +205,21 @@ impl PresenceHub {
   }
 
   pub fn unregister(&self, uin: GGNumber, _watched: &[GGNumber]) {
-    self.notify(UserPresence::offline(uin));
+    let retain = self.find(&uin).status.base() == GGStatus::NotAvailDescr;
+    if !retain {
+      self.notify(UserPresence::offline(uin));
+    }
     self.sessions.write().remove(&uin);
     self.unsubscribe_all(uin);
-    self.books.write().remove(&uin);
-    self.state.write().remove(&uin);
+    if !retain {
+      self.books.write().remove(&uin);
+      self.state.write().remove(&uin);
+    }
+  }
+
+  pub fn restore_offline(&self, presence: UserPresence, book: ContactBook) {
+    self.books.write().insert(presence.uin, book);
+    self.state.write().insert(presence.uin, presence);
   }
 }
 

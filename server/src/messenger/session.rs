@@ -36,6 +36,7 @@ pub struct UserSessionController {
   contacts_ready: bool,
   image_events: Option<tokio_stream::wrappers::ReceiverStream<ImageEvent>>,
   image_size: u8,
+  logoff: bool,
 }
 #[derive(Error, Debug)]
 pub enum UserSessionError {
@@ -72,6 +73,7 @@ impl UserSessionController {
       contacts_ready: false,
       image_events: None,
       image_size: 0,
+      logoff: false,
     }
   }
   async fn send(&mut self, packet: GGPacket) -> Result<(), UserSessionError> {
@@ -124,14 +126,44 @@ impl UserSessionController {
     if self.replaced.is_cancelled() {
       return Err(UserSessionError::Closed);
     }
+    crate::models::offline_presence::clear(self.app_state.db_pool(), uin).await?;
     self.presence_changes = Some(self.app_state.presence_hub().register(uin));
-    self.app_state.presence_hub().notify(
-      self
-        .initial_presence
-        .take()
-        .unwrap_or_else(|| UserPresence::available(uin)),
-    );
+    // Do not publish until the complete contact/privacy list has arrived.
     self.send(GGPacket::LoginOk).await
+  }
+  async fn publish_initial(&mut self) -> Result<(), UserSessionError> {
+    if let Some(presence) = self.initial_presence.take() {
+      self.set_presence(presence).await?;
+    }
+    Ok(())
+  }
+  async fn set_presence(&mut self, mut presence: UserPresence) -> Result<(), UserSessionError> {
+    use gg_protocol::consts::GGStatus;
+    let offline = matches!(
+      presence.status.base(),
+      GGStatus::NotAvail | GGStatus::NotAvailDescr
+    );
+    if !offline && !self.contacts_ready {
+      self.initial_presence = Some(presence);
+      return Ok(());
+    }
+    if offline {
+      self.logoff = true;
+      presence.image_size = 0;
+      // Never expose a description without the account's complete privacy list.
+      if self.contacts_ready
+        && presence.status.base() == GGStatus::NotAvailDescr
+        && presence.description.as_ref().is_some_and(|d| !d.is_empty())
+      {
+        crate::models::offline_presence::save(self.app_state.db_pool(), &presence, &self.contacts)
+          .await?;
+      } else {
+        crate::models::offline_presence::clear(self.app_state.db_pool(), presence.uin).await?;
+        presence = UserPresence::offline(presence.uin);
+      }
+    }
+    self.app_state.presence_hub().notify(presence);
+    Ok(())
   }
   async fn deliver_pending(&mut self) -> Result<(), UserSessionError> {
     if !self.contacts_ready {
@@ -167,6 +199,10 @@ impl UserSessionController {
     self.contacts.set(contacts);
     self.app_state.presence_hub().set_book(uin, &self.contacts);
     self.contacts_ready = true;
+    self.publish_initial().await?;
+    if self.logoff {
+      return Ok(());
+    }
     let statuses = self
       .contacts
       .watched()
@@ -243,6 +279,7 @@ impl UserSessionController {
     let mut image_requests = 0u32;
     loop {
       tokio::select! {
+          biased;
           _ = self.shutdown.cancelled() => break,
           _ = self.replaced.cancelled() => break,
           _ = poll.tick() => {
@@ -281,7 +318,8 @@ impl UserSessionController {
                   GGPacket::ListEmpty => {
                       contacts.clear(); self.contacts.set(&[]);
                       self.app_state.presence_hub().set_book(uin, &self.contacts);
-                      self.contacts_ready = true; self.deliver_pending().await?;
+                      self.contacts_ready = true; self.publish_initial().await?;
+                      if !self.logoff { self.deliver_pending().await?; }
                   }
                   GGPacket::NotifyFirst(batch) => {
                       if contacts.len() + batch.len() > 1000 { return Err(UserSessionError::Limit); }
@@ -299,19 +337,26 @@ impl UserSessionController {
                   }
                   GGPacket::NewStatus(status) => {
                       if status.description.as_ref().is_some_and(|d| d.chars().count() > 70) { return Err(UserSessionError::Limit); }
-                      self.app_state.presence_hub().notify(UserPresence { uin, image_size: self.app_state.presence_hub().find(&uin).image_size, status: status.status, description: status.description, time: status.time });
+                      self.set_presence(UserPresence { uin, image_size: self.image_size, status: status.status, description: status.description, time: status.time }).await?;
                   }
                   GGPacket::UserListRequest { kind, data } => self.user_list(kind, data).await?,
                   GGPacket::Disconnect => break,
                   _ => {} // Unknown extensions contain no decoded user text in logs.
               }
+              if self.logoff { break; }
           }
       }
     }
-    let _ = self.send(GGPacket::Disconnect).await;
+    // GG_DISCONNECTING means a forced logout (e.g. another login), not maintenance.
+    // Classic clients can stop reconnecting after it. A restart gets an ordinary FIN.
+    if self.replaced.is_cancelled() && !self.shutdown.is_cancelled() {
+      let _ = self.send(GGPacket::Disconnect).await;
+    }
     Ok(())
   }
   pub async fn cleanup(&mut self) {
+    // Flush then half-close, so queued data/FIN is not replaced by an abrupt reset.
+    let _ = tokio::time::timeout(Duration::from_secs(1), self.protocol.close()).await;
     if let (Some(uin), Some(id)) = (self.uin, self.registration.take()) {
       for (target, event) in self.app_state.images.disconnect(uin, id) {
         self

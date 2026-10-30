@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub mod images;
 pub mod message;
+pub mod offline_presence;
 pub mod registration;
 pub mod token;
 pub mod user;

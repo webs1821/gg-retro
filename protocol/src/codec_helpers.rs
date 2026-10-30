@@ -58,35 +58,16 @@ pub fn decode_contact_statuses(src: &mut BytesMut, mut length: usize) -> Vec<Con
       length -= 1;
 
       if description_size > 0 && length >= description_size {
-        // description_size includes: description + null terminator (1 byte) + time (4 bytes, optional)
-        // Check if there's time at the end (need at least 5 bytes: 1 null + 4 time)
-        let has_time = description_size >= 5;
-        // desc_len = total - null terminator - time (if present)
-        let desc_len = if has_time {
-          description_size - 5
-        } else {
-          description_size.saturating_sub(1)
-        };
-
-        let desc = if desc_len > 0 {
-          let d = decode_cp1250(&src[..desc_len]);
-          src.advance(desc_len);
-          Some(d)
-        } else {
-          None
-        };
-
-        // Skip null terminator
-        if description_size > desc_len {
-          src.advance(1);
-        }
-
-        let time = if has_time {
-          Some(src.get_u32_le())
-        } else {
-          None
-        };
-
+        let block = src.split_to(description_size);
+        // A long description alone is not a timestamp. GG6 appends NUL + u32.
+        let has_time = description_size >= 5 && block[description_size - 5] == 0;
+        let end = block
+          .iter()
+          .position(|b| *b == 0)
+          .unwrap_or(description_size);
+        let desc = (end > 0).then(|| decode_cp1250(&block[..end]));
+        let time =
+          has_time.then(|| u32::from_le_bytes(block[description_size - 4..].try_into().unwrap()));
         length -= description_size;
         (desc, time)
       } else {

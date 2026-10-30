@@ -151,12 +151,14 @@ pub async fn create_app_state() -> Result<SharedAppState, Box<dyn std::error::Er
     None => local_ip_address::local_ip()?,
   };
   let message_dispatcher = MessageDispatcher::new(&db_pool);
+  let presence_hub = PresenceHub::new();
+  crate::models::offline_presence::restore(&db_pool, &presence_hub).await?;
   Ok(Arc::new(AppState {
     images: crate::messenger::images::ImageService::new(),
     db_pool,
     client_downloads,
     host_ip,
-    presence_hub: PresenceHub::new(),
+    presence_hub,
     message_dispatcher,
     config,
     vault,
