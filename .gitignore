@@ -11,3 +11,9 @@ docs/kadu/
 /config.toml
 /server/config.toml
 /client/config.toml
+
+/secrets/
+/.private/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

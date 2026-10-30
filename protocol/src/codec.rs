@@ -1,14 +1,15 @@
+use crate::codec_helpers::{
+  decode_contact_entries, decode_contact_statuses, decode_cp1250, decode_richtext_formatting,
+  encode_contact_status_no_size, encode_contact_status_with_size, encode_cp1250,
+  encode_richtext_formatting,
+};
+use crate::consts::{AckStatus, GGMessageClass, GGStatus, packet_type};
+use crate::error::GGError;
+use crate::packets::{
+  GGLogin60, GGPacket, GGRecvMessage, GGSendMessage, GGSendMessageAck, NewStatus,
+};
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
-use crate::consts::{packet_type, AckStatus, GGStatus, GGMessageClass};
-use crate::error::GGError;
-use crate::packets::{GGLogin60, GGPacket, GGRecvMessage, GGSendMessage, GGSendMessageAck, NewStatus};
-use crate::codec_helpers::{
-  decode_cp1250, encode_cp1250,
-  decode_contact_entries, decode_contact_statuses,
-  encode_contact_status_with_size, encode_contact_status_no_size,
-  encode_richtext_formatting, decode_richtext_formatting,
-};
 
 /// Codec mode for handling direction-dependent packet types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,12 +29,16 @@ pub struct GGCodec {
 impl GGCodec {
   /// Create a codec for server-side usage (decodes C → S packets).
   pub fn server() -> Self {
-    Self { mode: CodecMode::Server }
+    Self {
+      mode: CodecMode::Server,
+    }
   }
 
   /// Create a codec for client-side usage (decodes S → C packets).
   pub fn client() -> Self {
-    Self { mode: CodecMode::Client }
+    Self {
+      mode: CodecMode::Client,
+    }
   }
 }
 
@@ -42,6 +47,31 @@ impl Encoder<GGPacket> for GGCodec {
 
   fn encode(&mut self, item: GGPacket, dst: &mut BytesMut) -> Result<(), Self::Error> {
     match item {
+      GGPacket::AddNotify(entry) => {
+        dst.put_u32_le(0x0d);
+        dst.put_u32_le(5);
+        dst.put_u32_le(entry.uin);
+        dst.put_u8(entry.user_type.bits());
+      }
+      GGPacket::RemoveNotify(entry) => {
+        dst.put_u32_le(0x0e);
+        dst.put_u32_le(5);
+        dst.put_u32_le(entry.uin);
+        dst.put_u8(entry.user_type.bits());
+      }
+      GGPacket::UserListRequest { kind, data } | GGPacket::UserListReply { kind, data } => {
+        dst.put_u32_le(if self.mode == CodecMode::Client {
+          0x16
+        } else {
+          0x10
+        });
+        dst.put_u32_le((data.len() + 1) as u32);
+        dst.put_u8(kind);
+        dst.extend_from_slice(&data);
+      }
+      GGPacket::Unknown { .. } => {
+        return Err(GGError::InvalidFrame("cannot encode unknown packet"));
+      }
       GGPacket::Welcome { seed } => {
         dst.put_u32_le(packet_type::GG_WELCOME);
         dst.put_u32_le(4);
@@ -52,17 +82,17 @@ impl Encoder<GGPacket> for GGCodec {
         let mut payload = BytesMut::new();
 
         // Fixed fields (always present) - 31 bytes total
-        payload.put_u32_le(login.uin);          // 4 bytes
-        payload.put_u32_le(login.hash);         // 4 bytes
-        payload.put_u32_le(login.status as u32);// 4 bytes
-        payload.put_u32_le(login.version);      // 4 bytes
-        payload.put_u8(login.unknown1);         // 1 byte (0x00)
-        payload.put_slice(&login.local_ip.octets());  // 4 bytes
-        payload.put_u16_le(login.local_port);   // 2 bytes
+        payload.put_u32_le(login.uin); // 4 bytes
+        payload.put_u32_le(login.hash); // 4 bytes
+        payload.put_u32_le(login.status.bits()); // 4 bytes
+        payload.put_u32_le(login.version); // 4 bytes
+        payload.put_u8(login.unknown1); // 1 byte (0x00)
+        payload.put_slice(&login.local_ip.octets()); // 4 bytes
+        payload.put_u16_le(login.local_port); // 2 bytes
         payload.put_slice(&login.external_ip.octets()); // 4 bytes
         payload.put_u16_le(login.external_port); // 2 bytes
-        payload.put_u8(login.image_size);       // 1 byte
-        payload.put_u8(login.unknown2);         // 1 byte (0xbe)
+        payload.put_u8(login.image_size); // 1 byte
+        payload.put_u8(login.unknown2); // 1 byte (0xbe)
 
         // Optional fields (description + time)
         if let Some(ref desc) = login.description {
@@ -92,7 +122,7 @@ impl Encoder<GGPacket> for GGCodec {
       GGPacket::Ping => {
         dst.put_u32_le(packet_type::GG_PING);
         dst.put_u32_le(0);
-      },
+      }
 
       GGPacket::ListEmpty => {
         dst.put_u32_le(packet_type::GG_LIST_EMPTY);
@@ -105,7 +135,7 @@ impl Encoder<GGPacket> for GGCodec {
         dst.put_u32_le(length as u32);
         for entry in entries {
           dst.put_u32_le(entry.uin);
-          dst.put_u8(entry.user_type as u8);
+          dst.put_u8(entry.user_type.bits());
         }
       }
 
@@ -115,14 +145,14 @@ impl Encoder<GGPacket> for GGCodec {
         dst.put_u32_le(length as u32);
         for entry in entries {
           dst.put_u32_le(entry.uin);
-          dst.put_u8(entry.user_type as u8);
+          dst.put_u8(entry.user_type.bits());
         }
       }
 
       GGPacket::Pong => {
         dst.put_u32_le(packet_type::GG_PONG);
         dst.put_u32_le(0);
-      },
+      }
 
       GGPacket::Disconnect => {
         dst.put_u32_le(packet_type::GG_DISCONNECTING);
@@ -149,7 +179,7 @@ impl Encoder<GGPacket> for GGCodec {
 
       GGPacket::NewStatus(new_status) => {
         let mut payload = BytesMut::new();
-        payload.put_u32_le(new_status.status as u32);
+        payload.put_u32_le(new_status.status.bits());
 
         // Optional description (null-terminated) + optional time
         if let Some(ref desc) = new_status.description {
@@ -170,7 +200,7 @@ impl Encoder<GGPacket> for GGCodec {
         let mut payload = BytesMut::new();
         payload.put_u32_le(msg.recipient);
         payload.put_u32_le(msg.seq);
-        payload.put_u32_le(msg.class as u32);
+        payload.put_u32_le(msg.class.bits());
         let msg_bytes = encode_cp1250(&msg.message);
         payload.put_slice(&msg_bytes);
         payload.put_u8(0); // null terminator
@@ -193,7 +223,7 @@ impl Encoder<GGPacket> for GGCodec {
         payload.put_u32_le(msg.sender);
         payload.put_u32_le(msg.seq);
         payload.put_u32_le(msg.time);
-        payload.put_u32_le(msg.class as u32);
+        payload.put_u32_le(msg.class.bits());
         let msg_bytes = encode_cp1250(&msg.message);
         payload.put_slice(&msg_bytes);
         payload.put_u8(0); // null terminator
@@ -229,25 +259,89 @@ impl Decoder for GGCodec {
 
   fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
     if src.len() < 8 {
-      return Ok(None)
+      return Ok(None);
     }
 
     // Peek at the packet type and length without consuming
     let packet_type = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
     let length = u32::from_le_bytes([src[4], src[5], src[6], src[7]]) as usize;
 
+    if length > 65_536 {
+      return Err(GGError::InvalidFrame("payload exceeds 64 KiB"));
+    }
+    let min = match (self.mode, packet_type) {
+      (_, 1) => 4,
+      (_, 0x15) => 31,
+      (_, 2) => 4,
+      (CodecMode::Server, 0x0b) => 13,
+      (CodecMode::Server, 0x0d | 0x0e) => 5,
+      (CodecMode::Server, 0x16) | (CodecMode::Client, 0x10) => 1,
+      (_, 0x0a) => 17,
+      (_, 5) => 12,
+      (CodecMode::Client, 0x0f) => 14,
+      _ => 0,
+    };
+    if length < min {
+      return Err(GGError::InvalidFrame("truncated fixed fields"));
+    }
+    if self.mode == CodecMode::Server
+      && matches!(packet_type, 0x0d | 0x0e | 0x0f | 0x10)
+      && (!length.is_multiple_of(5) || (matches!(packet_type, 0x0d | 0x0e) && length != 5))
+    {
+      return Err(GGError::InvalidFrame("invalid contact entry length"));
+    }
     // Check if we have enough data for the full packet
     if src.len() < 8 + length {
-      return Ok(None)
+      return Ok(None);
     }
 
     // Now consume the header
     src.advance(8);
-
+    // Parse an isolated frame: a malformed extension can never consume the next header.
+    let mut frame = src.split_to(length);
+    let src = &mut frame;
     match packet_type {
+      0x0d | 0x0e if self.mode == CodecMode::Server => {
+        let entry = decode_contact_entries(src, 5).remove(0);
+        Ok(Some(if packet_type == 0x0d {
+          GGPacket::AddNotify(entry)
+        } else {
+          GGPacket::RemoveNotify(entry)
+        }))
+      }
+      0x16 if self.mode == CodecMode::Server => {
+        let kind = src.get_u8();
+        Ok(Some(GGPacket::UserListRequest {
+          kind,
+          data: src.to_vec(),
+        }))
+      }
+      0x10 if self.mode == CodecMode::Client => {
+        let kind = src.get_u8();
+        Ok(Some(GGPacket::UserListReply {
+          kind,
+          data: src.to_vec(),
+        }))
+      }
+      0x0f if self.mode == CodecMode::Client => {
+        // GG_STATUS60 uses a trailing description without the length byte.
+        let mut status_frame = src.split_to(14);
+        let mut statuses = decode_contact_statuses(&mut status_frame, 14);
+        let mut status = statuses.remove(0);
+        if !src.is_empty() {
+          let end = src.iter().position(|b| *b == 0).unwrap_or(src.len());
+          status.description = Some(decode_cp1250(&src[..end]));
+          if src.len() >= end + 5 {
+            status.time = Some(u32::from_le_bytes(
+              src[end + 1..end + 5].try_into().unwrap(),
+            ));
+          }
+        }
+        Ok(Some(GGPacket::Status60(status)))
+      }
       packet_type::GG_WELCOME => {
         let seed = src.get_u32_le();
-        return Ok(Some(GGPacket::Welcome { seed }))
+        return Ok(Some(GGPacket::Welcome { seed }));
       }
 
       packet_type::GG_LOGIN60 => {
@@ -274,7 +368,11 @@ impl Decoder for GGCodec {
 
         let (description, time) = if remaining > 0 {
           // Find null terminator
-          let desc_end = src.iter().take(remaining).position(|&b| b == 0).unwrap_or(remaining);
+          let desc_end = src
+            .iter()
+            .take(remaining)
+            .position(|&b| b == 0)
+            .unwrap_or(remaining);
           let desc = decode_cp1250(&src[..desc_end]);
           src.advance(desc_end);
 
@@ -299,7 +397,9 @@ impl Decoder for GGCodec {
         return Ok(Some(GGPacket::Login60(GGLogin60 {
           uin,
           hash,
-          status: status.try_into().unwrap_or(GGStatus::Avail),
+          status: status
+            .try_into()
+            .map_err(|_| GGError::InvalidFrame("unsupported status"))?,
           version,
           unknown1,
           local_ip,
@@ -310,29 +410,29 @@ impl Decoder for GGCodec {
           unknown2,
           description,
           time,
-        })))
+        })));
       }
 
       packet_type::GG_LOGIN_OK => {
         if length > 0 {
           src.advance(length); // Skip any unexpected content
         }
-        return Ok(Some(GGPacket::LoginOk))
+        return Ok(Some(GGPacket::LoginOk));
       }
 
       packet_type::GG_PING => {
         if length > 0 {
           src.advance(length); // Skip any unexpected content
         }
-        return Ok(Some(GGPacket::Ping))
+        return Ok(Some(GGPacket::Ping));
       }
 
       packet_type::GG_PONG => {
         if length > 0 {
           src.advance(length); // Skip any unexpected content
         }
-        return Ok(Some(GGPacket::Pong))
-      },
+        return Ok(Some(GGPacket::Pong));
+      }
 
       packet_type::GG_DISCONNECTING => {
         // 0x000b is used for both GG_DISCONNECTING (S→C) and GG_SEND_MSG (C→S)
@@ -348,7 +448,11 @@ impl Decoder for GGCodec {
             // Remaining bytes are message content (null-terminated) + optional formatting
             let remaining = length.saturating_sub(12);
             let (message, formatting) = if remaining > 0 {
-              let msg_end = src.iter().take(remaining).position(|&b| b == 0).unwrap_or(remaining);
+              let msg_end = src
+                .iter()
+                .take(remaining)
+                .position(|&b| b == 0)
+                .unwrap_or(remaining);
               let msg = decode_cp1250(&src[..msg_end]);
               src.advance(msg_end);
 
@@ -378,14 +482,14 @@ impl Decoder for GGCodec {
               class,
               message,
               formatting,
-            })))
+            })));
           }
           CodecMode::Client => {
             // Client receives GG_DISCONNECTING from server
             if length > 0 {
               src.advance(length);
             }
-            return Ok(Some(GGPacket::Disconnect))
+            return Ok(Some(GGPacket::Disconnect));
           }
         }
       }
@@ -394,40 +498,45 @@ impl Decoder for GGCodec {
         if length > 0 {
           src.advance(length); // Skip any unexpected content
         }
-        return Ok(Some(GGPacket::ListEmpty))
+        return Ok(Some(GGPacket::ListEmpty));
       }
 
       packet_type::GG_NOTIFY_FIRST => {
         let entries = decode_contact_entries(src, length);
-        return Ok(Some(GGPacket::NotifyFirst(entries)))
+        return Ok(Some(GGPacket::NotifyFirst(entries)));
       }
 
       packet_type::GG_NOTIFY_LAST => {
         let entries = decode_contact_entries(src, length);
-        return Ok(Some(GGPacket::NotifyLast(entries)))
+        return Ok(Some(GGPacket::NotifyLast(entries)));
       }
 
       packet_type::GG_LOGIN_FAILED => {
         if length > 0 {
           src.advance(length); // Skip any content
         }
-        return Ok(Some(GGPacket::LoginFailed))
+        return Ok(Some(GGPacket::LoginFailed));
       }
 
       packet_type::GG_NOTIFY_REPLY60 => {
         let statuses = decode_contact_statuses(src, length);
-        return Ok(Some(GGPacket::NotifyReply60(statuses)))
+        return Ok(Some(GGPacket::NotifyReply60(statuses)));
       }
 
       packet_type::GG_NEW_STATUS => {
         let status_raw = src.get_u32_le();
-        let status = GGStatus::try_from(status_raw).unwrap_or_default();
+        let status = GGStatus::try_from(status_raw)
+          .map_err(|_| GGError::InvalidFrame("unsupported status"))?;
 
         // Parse optional description and time
         let remaining = length.saturating_sub(4);
         let (description, time) = if remaining > 0 {
           // Find null terminator
-          let desc_end = src.iter().take(remaining).position(|&b| b == 0).unwrap_or(remaining);
+          let desc_end = src
+            .iter()
+            .take(remaining)
+            .position(|&b| b == 0)
+            .unwrap_or(remaining);
           let desc = if desc_end > 0 {
             Some(decode_cp1250(&src[..desc_end]))
           } else {
@@ -457,7 +566,7 @@ impl Decoder for GGCodec {
           status,
           description,
           time,
-        })))
+        })));
       }
 
       packet_type::GG_RECV_MSG => {
@@ -470,7 +579,11 @@ impl Decoder for GGCodec {
         // Remaining bytes are message content (null-terminated) + optional formatting
         let remaining = length.saturating_sub(16);
         let (message, formatting) = if remaining > 0 {
-          let msg_end = src.iter().take(remaining).position(|&b| b == 0).unwrap_or(remaining);
+          let msg_end = src
+            .iter()
+            .take(remaining)
+            .position(|&b| b == 0)
+            .unwrap_or(remaining);
           let msg = decode_cp1250(&src[..msg_end]);
           src.advance(msg_end);
 
@@ -501,12 +614,13 @@ impl Decoder for GGCodec {
           class,
           message,
           formatting,
-        })))
+        })));
       }
 
       packet_type::GG_SEND_MSG_ACK => {
         let status_raw = src.get_u32_le();
-        let status = AckStatus::try_from(status_raw).map_err(|_| GGError::UnsupportedPacketType(status_raw))?;
+        let status = AckStatus::try_from(status_raw)
+          .map_err(|_| GGError::UnsupportedPacketType(status_raw))?;
         let recipient = src.get_u32_le();
         let seq = src.get_u32_le();
 
@@ -514,20 +628,20 @@ impl Decoder for GGCodec {
           status,
           recipient,
           seq,
-        })))
+        })));
       }
 
-      _ => return Err(GGError::UnsupportedPacketType(packet_type))
+      _ => Ok(Some(GGPacket::Unknown { packet_type })),
     }
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use std::net::Ipv4Addr;
-  use claims::{assert_ok, assert_ok_eq};
   use super::*;
   use crate::packets::{ContactEntry, ContactStatus, ContactType};
+  use claims::{assert_ok, assert_ok_eq};
+  use std::net::Ipv4Addr;
 
   #[test]
   fn it_handles_welcome_packet() {
@@ -624,8 +738,14 @@ mod tests {
     let mut codec = GGCodec::default();
 
     let entries = vec![
-      ContactEntry { uin: 1000, user_type: ContactType::Buddy },
-      ContactEntry { uin: 2000, user_type: ContactType::Friend },
+      ContactEntry {
+        uin: 1000,
+        user_type: ContactType::Buddy,
+      },
+      ContactEntry {
+        uin: 2000,
+        user_type: ContactType::Friend,
+      },
     ];
     let packet = GGPacket::NotifyFirst(entries.clone());
 
@@ -641,9 +761,10 @@ mod tests {
     let mut output = BytesMut::new();
     let mut codec = GGCodec::default();
 
-    let entries = vec![
-      ContactEntry { uin: 3000, user_type: ContactType::Blocked },
-    ];
+    let entries = vec![ContactEntry {
+      uin: 3000,
+      user_type: ContactType::Blocked,
+    }];
     let packet = GGPacket::NotifyLast(entries.clone());
 
     assert_ok!(codec.encode(packet.clone(), &mut output));
@@ -662,7 +783,7 @@ mod tests {
       // Entry WITH description - status must be a "with description" type (0x04)
       ContactStatus {
         uin: 1000,
-        flags: 0x40, // Voice
+        flags: 0x40,  // Voice
         status: 0x04, // Available WITH description (GG_STATUS_AVAIL_DESCR)
         remote_ip: Ipv4Addr::new(192, 168, 1, 100),
         remote_port: 1550,
@@ -700,7 +821,7 @@ mod tests {
 
     let status = ContactStatus {
       uin: 12345,
-      flags: 0x40, // Voice
+      flags: 0x40,  // Voice
       status: 0x04, // Available WITH description
       remote_ip: Ipv4Addr::new(192, 168, 1, 50),
       remote_port: 1550,
@@ -847,7 +968,7 @@ mod tests {
     // Create a minimal 0x000b packet with no payload
     let mut input = BytesMut::new();
     input.put_u32_le(0x000b); // packet type
-    input.put_u32_le(0);      // length
+    input.put_u32_le(0); // length
 
     let decoded = codec.decode(&mut input);
     assert_ok_eq!(decoded, Some(GGPacket::Disconnect));
@@ -860,10 +981,10 @@ mod tests {
 
     // Create a 0x000b packet with message payload
     let mut input = BytesMut::new();
-    input.put_u32_le(0x000b);  // packet type
-    input.put_u32_le(20);     // length: 4 + 4 + 4 + 6 (message) + 1 (null) + 1 (extra)
-    input.put_u32_le(12345);  // recipient
-    input.put_u32_le(1);      // seq
+    input.put_u32_le(0x000b); // packet type
+    input.put_u32_le(20); // length: 4 + 4 + 4 + 6 (message) + 1 (null) + 1 (extra)
+    input.put_u32_le(12345); // recipient
+    input.put_u32_le(1); // seq
     input.put_u32_le(0x0008); // class = Chat
     input.put_slice(b"Hello\0"); // message with null terminator
     input.put_slice(&[0, 0]); // padding to reach length 20
@@ -892,9 +1013,7 @@ mod tests {
       seq: 1,
       class: GGMessageClass::Chat,
       message: "Hello".to_string(),
-      formatting: Some(vec![
-        RichTextFormat::bold(0),
-      ]),
+      formatting: Some(vec![RichTextFormat::bold(0)]),
     };
     let packet = GGPacket::SendMessage(msg);
 
@@ -920,9 +1039,10 @@ mod tests {
       class: GGMessageClass::Chat,
       message: "Hello World".to_string(),
       formatting: Some(vec![
-        RichTextFormat::bold(0),                    // Bold starts at 0
-        RichTextFormat::new(5),                     // Normal at 5 (space)
-        RichTextFormat {                            // Colored at 6 ("World")
+        RichTextFormat::bold(0), // Bold starts at 0
+        RichTextFormat::new(5),  // Normal at 5 (space)
+        RichTextFormat {
+          // Colored at 6 ("World")
           position: 6,
           bold: false,
           italic: false,
@@ -952,15 +1072,13 @@ mod tests {
       seq: 1,
       class: GGMessageClass::Msg,
       message: "Styled text".to_string(),
-      formatting: Some(vec![
-        RichTextFormat {
-          position: 0,
-          bold: true,
-          italic: true,
-          underline: true,
-          color: None,
-        },
-      ]),
+      formatting: Some(vec![RichTextFormat {
+        position: 0,
+        bold: true,
+        italic: true,
+        underline: true,
+        color: None,
+      }]),
     };
     let packet = GGPacket::SendMessage(msg);
 

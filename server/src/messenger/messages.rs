@@ -1,110 +1,115 @@
-use std::collections::HashMap;
-use std::time::Duration;
-use thiserror::Error;
-use tokio::sync::{mpsc, RwLock};
-use tokio::sync::mpsc::error::SendError;
-use tokio::time::error::Elapsed;
+use crate::models::{DatabasePool, MessageRepository, RepositoryError, UserRepository};
+use gg_protocol::{
+  GGNumber,
+  consts::{AckStatus, GGMessageClass},
+  packets::{GGRecvMessage, GGSendMessage},
+};
+use parking_lot::Mutex as MapLock;
+use std::{
+  collections::HashMap,
+  sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+  },
+};
+use tokio::sync::{Mutex, OwnedMutexGuard, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::instrument;
-use gg_protocol::consts::AckStatus;
-use gg_protocol::GGNumber;
-use gg_protocol::packets::{GGRecvMessage, GGSendMessage};
-use crate::models::{DatabasePool, MessageRepository, RepositoryError, UserRepository, QueuedMessageId};
+use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Debug)]
-pub enum SessionMessage {
-  Disconnect,
-  QueuedMessage(QueuedMessageId)
+pub type MessagesStream = ReceiverStream<()>;
+struct Registration {
+  id: u64,
+  notify: mpsc::Sender<()>,
+  stop: CancellationToken,
+  delivery: Arc<Mutex<()>>,
 }
-
-pub type MessagesStream = ReceiverStream<SessionMessage>;
-
-#[derive(Debug)]
 pub struct MessageDispatcher {
-  sessions: RwLock<HashMap<GGNumber, mpsc::Sender<SessionMessage>>>,
+  sessions: MapLock<HashMap<GGNumber, Registration>>,
+  next_id: AtomicU64,
   db_pool: DatabasePool,
 }
-
-#[derive(Error, Debug)]
-pub enum MessageDispatcherError {
-  #[error("Failed to deliver message to recipient session")]
-  MessageDeliveryFailed(#[from] SendError<SessionMessage>),
-  #[error("Failed to store message in database")]
-  StorageError(#[from] RepositoryError),
-  #[error("Failed to send message to recipient session")]
-  SendTimeout(#[from] Elapsed)
-}
-
 impl MessageDispatcher {
   pub fn new(db_pool: &DatabasePool) -> Self {
     Self {
-      sessions: RwLock::new(HashMap::new()),
-      db_pool: db_pool.clone()
+      sessions: MapLock::new(HashMap::new()),
+      next_id: AtomicU64::new(1),
+      db_pool: db_pool.clone(),
     }
   }
-
-  #[instrument(skip(self))]
-  pub async fn register(&self, uin: GGNumber) -> MessagesStream {
-    let mut sessions = self.sessions.write().await;
-    let (tx, rx) = mpsc::channel::<SessionMessage>(100);
-    sessions.insert(uin, tx);
-    ReceiverStream::new(rx)
-  }
-
-  #[instrument(skip(self))]
-  pub async fn unregister(&self, uin: GGNumber) {
-    let mut sessions = self.sessions.write().await;
-    sessions.remove(&uin);
-  }
-
-  #[instrument(skip(self))]
-  pub async fn kick(&self, uin: GGNumber) {
-    let mut sessions = self.sessions.write().await;
-    if let Some(sender) = sessions.get(&uin) {
-      tracing::info!(uin = uin, "User already signed in, kicking other session");
-      let _ = sender.send(SessionMessage::Disconnect).await;
-      sessions.remove(&uin);
-      tokio::time::sleep(Duration::from_millis(10)).await;// yield thread
-    }
-  }
-
-  #[instrument(skip(self))]
-  pub async fn dispatch(&self, sender: GGNumber, incoming_msg : GGSendMessage) -> Result<AckStatus, MessageDispatcherError> {
-    let messages = MessageRepository::new(&self.db_pool);
-    let users = UserRepository::new(&self.db_pool);
-    let sessions = self.sessions.read().await;
-    let recipient = sessions.get(&incoming_msg.recipient);
-    let now = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .unwrap_or_default()
-      .as_secs() as u32;
-    
-    if !users.exists(sender).await? || !users.exists(incoming_msg.recipient).await? {
-      tracing::error!(sender = sender, recipient = incoming_msg.recipient, "message dispatch failed: one or both users do not exist");
-      return Ok(AckStatus::NotDelivered)
-    }
-
-    let recv_msg = GGRecvMessage {
-      message: incoming_msg.message,
-      class: incoming_msg.class,
-      seq: incoming_msg.seq,
-      time: now,
-      sender,
-      formatting: incoming_msg.formatting,
+  /// Cancel the old reader and serialize delivery/cleanup for this account.
+  /// No registry lock is held across an await or socket write.
+  pub async fn register(
+    &self,
+    uin: GGNumber,
+  ) -> (u64, MessagesStream, CancellationToken, OwnedMutexGuard<()>) {
+    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = mpsc::channel(1);
+    let stop = CancellationToken::new();
+    let delivery = {
+      let mut sessions = self.sessions.lock();
+      let delivery = if let Some(old) = sessions.get(&uin) {
+        old.stop.cancel();
+        old.delivery.clone()
+      } else {
+        Arc::new(Mutex::new(()))
+      };
+      sessions.insert(
+        uin,
+        Registration {
+          id,
+          notify: tx,
+          stop: stop.clone(),
+          delivery: delivery.clone(),
+        },
+      );
+      delivery
     };
-
-    let msg = messages.store(incoming_msg.recipient, &recv_msg).await?;
-
-    if let Some(tx) = recipient {
-      let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        tx.send(SessionMessage::QueuedMessage(msg.id))
-      ).await?;
-      tracing::info!(msg_id = msg.id, "Message send for delivery");
-      Ok(AckStatus::Delivered)
-    } else {
-      tracing::info!(msg_id = msg.id, "Message put to queue, user offline");
-      Ok(AckStatus::Queued)
+    let guard = delivery.lock_owned().await;
+    (id, ReceiverStream::new(rx), stop, guard)
+  }
+  pub fn unregister(&self, uin: GGNumber, id: u64) {
+    let mut sessions = self.sessions.lock();
+    if sessions.get(&uin).is_some_and(|s| s.id == id) {
+      sessions.remove(&uin);
     }
+  }
+  pub async fn dispatch(
+    &self,
+    sender: GGNumber,
+    incoming: GGSendMessage,
+  ) -> Result<AckStatus, RepositoryError> {
+    let users = UserRepository::new(&self.db_pool);
+    if incoming.message.len() > 8192 || !users.exists(incoming.recipient).await? {
+      return Ok(AckStatus::NotDelivered);
+    }
+    let online = self.sessions.lock().contains_key(&incoming.recipient);
+    let class = GGMessageClass::try_from((incoming.class.bits() & !1) | u32::from(!online))
+      .unwrap_or_default();
+    let message = GGRecvMessage {
+      sender,
+      seq: incoming.seq,
+      class,
+      message: incoming.message,
+      formatting: incoming.formatting,
+      time: std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32,
+    };
+    match MessageRepository::new(&self.db_pool)
+      .store(incoming.recipient, &message)
+      .await
+    {
+      Err(RepositoryError::MailboxFull) => return Ok(AckStatus::MboxFull),
+      Err(error) => return Err(error),
+      Ok(_) => {}
+    }
+    // The durable database is authoritative; a coalesced/lost wake-up is recovered by polling.
+    let sessions = self.sessions.lock();
+    if let Some(session) = sessions.get(&incoming.recipient) {
+      let _ = session.notify.try_send(());
+    }
+    // GG6 has no recipient acknowledgement: promise durable acceptance, never receipt/read.
+    Ok(AckStatus::Queued)
   }
 }

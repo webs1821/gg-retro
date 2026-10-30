@@ -43,72 +43,51 @@ pub const GG60_MAX_UIN: GGNumber = 0x00FFFFFF; // 16,777,215
 /// Friends only mask - OR with status to enable "friends only" mode.
 pub const STATUS_FRIENDS_MASK: u32 = 0x8000;
 
-/// User status.
+/// Wire bit field: combinations must survive decoding and forwarding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum GGStatus {
-  /// Not available.
-  NotAvail = 0x0001,
-  /// Not available with description.
-  NotAvailDescr = 0x0015,
-  /// Available.
-  Avail = 0x0002,
-  /// Available with description.
-  AvailDescr = 0x0004,
-  /// Busy.
-  Busy = 0x0003,
-  /// Busy with description.
-  BusyDescr = 0x0005,
-  /// Invisible.
-  Invisible = 0x0014,
-  /// Invisible with description.
-  InvisibleDescr = 0x0016,
-  /// Blocked.
-  Blocked = 0x0006,
-}
+pub struct GGStatus(u32);
+#[allow(non_upper_case_globals)]
+impl GGStatus {
+  pub const NotAvail: Self = Self(1);
+  pub const NotAvailDescr: Self = Self(0x15);
+  pub const Avail: Self = Self(2);
+  pub const AvailDescr: Self = Self(4);
+  pub const Busy: Self = Self(3);
+  pub const BusyDescr: Self = Self(5);
+  pub const Invisible: Self = Self(0x14);
+  pub const InvisibleDescr: Self = Self(0x16);
+  pub const Blocked: Self = Self(6);
+  pub fn bits(self) -> u32 {
+    self.0
+  }
 
+  pub fn base(self) -> Self {
+    Self(self.0 & !0x8000)
+  }
+  pub fn friends_only(self) -> bool {
+    self.0 & 0x8000 != 0
+  }
+  pub fn has_description(self) -> bool {
+    status_has_description(self.0 as u8)
+  }
+}
 impl Default for GGStatus {
   fn default() -> Self {
     Self::NotAvail
   }
 }
-
-impl GGStatus {
-  /// Returns true if this status type includes a description field.
-  pub fn has_description(&self) -> bool {
-    matches!(self,
-      GGStatus::NotAvailDescr |
-      GGStatus::AvailDescr |
-      GGStatus::BusyDescr |
-      GGStatus::InvisibleDescr
-    )
-  }
-}
-
-/// Check if raw status byte indicates description presence (GG_S_D macro equivalent).
-pub fn status_has_description(status: u8) -> bool {
-  matches!(status, 0x04 | 0x05 | 0x15 | 0x16)
-}
-
 impl TryFrom<u32> for GGStatus {
   type Error = u32;
-
   fn try_from(value: u32) -> Result<Self, Self::Error> {
-    // Mask off friends-only bit before matching
-    let base = value & !STATUS_FRIENDS_MASK;
-    match base {
-      0x0001 => Ok(GGStatus::NotAvail),
-      0x0015 => Ok(GGStatus::NotAvailDescr),
-      0x0002 => Ok(GGStatus::Avail),
-      0x0004 => Ok(GGStatus::AvailDescr),
-      0x0003 => Ok(GGStatus::Busy),
-      0x0005 => Ok(GGStatus::BusyDescr),
-      0x0014 => Ok(GGStatus::Invisible),
-      0x0016 => Ok(GGStatus::InvisibleDescr),
-      0x0006 => Ok(GGStatus::Blocked),
-      _ => Err(value),
+    if matches!(value & !0x8000, 1..=6 | 0x14..=0x16) {
+      Ok(Self(value))
+    } else {
+      Err(value)
     }
   }
+}
+pub fn status_has_description(status: u8) -> bool {
+  matches!(status, 0x04 | 0x05 | 0x15 | 0x16)
 }
 
 /// Client version constants for GG 6.0.
@@ -125,38 +104,35 @@ pub mod version {
   pub const GG_HAS_AUDIO_MASK: u32 = 0x40000000;
 }
 
-/// Message class/type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[repr(u32)]
-pub enum GGMessageClass {
-  /// Message was queued for offline user.
-  Queued = 0x0001,
-  /// Display in separate window.
-  #[default]
-  Msg = 0x0004,
-  /// Display in chat window.
-  Chat = 0x0008,
-  /// Client command (not displayed).
-  Ctcp = 0x0010,
-  /// No acknowledgment required.
-  Ack = 0x0020,
+/// Wire bit field: combinations must survive decoding and forwarding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GGMessageClass(u32);
+#[allow(non_upper_case_globals)]
+impl GGMessageClass {
+  pub const Queued: Self = Self(1);
+  pub const Msg: Self = Self(4);
+  pub const Chat: Self = Self(8);
+  pub const Ctcp: Self = Self(16);
+  pub const Ack: Self = Self(32);
+  pub fn bits(self) -> u32 {
+    self.0
+  }
 }
-
+impl Default for GGMessageClass {
+  fn default() -> Self {
+    Self::Msg
+  }
+}
 impl TryFrom<u32> for GGMessageClass {
   type Error = u32;
-
   fn try_from(value: u32) -> Result<Self, Self::Error> {
-    match value {
-      0x0001 => Ok(GGMessageClass::Queued),
-      0x0004 => Ok(GGMessageClass::Msg),
-      0x0008 => Ok(GGMessageClass::Chat),
-      0x0010 => Ok(GGMessageClass::Ctcp),
-      0x0020 => Ok(GGMessageClass::Ack),
-      _ => Err(value),
+    if value & !0x3d == 0 {
+      Ok(Self(value))
+    } else {
+      Err(value)
     }
   }
 }
-
 /// Font attribute flags for rich text messages.
 /// These can be combined (bitwise OR) except GG_FONT_IMAGE which is special.
 pub mod font {

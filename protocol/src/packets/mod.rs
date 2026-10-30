@@ -5,14 +5,34 @@ mod message;
 mod notify;
 
 pub use login::GGLogin60;
-pub use message::{GGRecvMessage, GGSendMessage, GGSendMessageAck, RgbColor, RichTextFormat, RichTextFormats};
-pub use notify::{ContactEntry, ContactList, ContactStatus, ContactStatuses, ContactType, NewStatus, UinFlag};
+pub use message::{
+  GGRecvMessage, GGSendMessage, GGSendMessageAck, RgbColor, RichTextFormat, RichTextFormats,
+};
+pub use notify::{
+  ContactEntry, ContactList, ContactStatus, ContactStatuses, ContactType, NewStatus, UinFlag,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GGPacket {
+  AddNotify(ContactEntry),
+  RemoveNotify(ContactEntry),
+  UserListRequest {
+    kind: u8,
+    data: Vec<u8>,
+  },
+  UserListReply {
+    kind: u8,
+    data: Vec<u8>,
+  },
+  /// Unsupported extension, consumed without desynchronizing the stream.
+  Unknown {
+    packet_type: u32,
+  },
   /// Welcome packet with seed for password hashing (S → C).
   /// Sent by server immediately after client connects.
-  Welcome { seed: u32 },
+  Welcome {
+    seed: u32,
+  },
   /// Login packet (C → S).
   /// Sent by client to authenticate with UIN and password hash.
   Login60(GGLogin60),

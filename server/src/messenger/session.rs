@@ -1,18 +1,18 @@
-use std::fmt::{Debug, Formatter};
-use std::time::Duration;
+use super::{MessagesStream, PresenceChangeStream, UserPresence, contact_book::ContactBook};
+use crate::{
+  core::SharedAppState,
+  models::{MessageRepository, UserRepository},
+};
 use futures::{SinkExt, StreamExt};
+use gg_protocol::{
+  GGCodec, GGError, GGNumber, GGPacket,
+  packets::{ContactEntry, GGSendMessageAck},
+};
 use rand::Rng;
+use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::net::TcpStream;
-use tokio_util::codec::Framed;
-use tokio_util::sync::CancellationToken;
-use tracing::instrument;
-use gg_protocol::{GGCodec, GGError, GGPacket, GGNumber};
-use gg_protocol::packets::{ContactEntry, ContactStatus, ContactType, GGSendMessageAck};
-use crate::core::SharedAppState;
-use crate::messenger::{MessageDispatcherError, MessagesStream, PresenceChangeStream, SessionMessage, UserPresence};
-use crate::messenger::contact_book::ContactBook;
-use crate::models::{MessageRepository, UserRepository};
+use tokio::{net::TcpStream, sync::OwnedMutexGuard};
+use tokio_util::{codec::Framed, sync::CancellationToken};
 
 pub struct UserSessionController {
   seed: u32,
@@ -20,349 +20,275 @@ pub struct UserSessionController {
   initial_presence: Option<UserPresence>,
   contacts: ContactBook,
   protocol: Framed<TcpStream, GGCodec>,
-  peer_addr: std::net::SocketAddr,
   shutdown: CancellationToken,
+  replaced: CancellationToken,
   app_state: SharedAppState,
-  presence_change_stream: Option<PresenceChangeStream>,
-  messages_stream: Option<MessagesStream>
+  presence_changes: Option<PresenceChangeStream>,
+  messages: Option<MessagesStream>,
+  registration: Option<u64>,
+  delivery_guard: Option<OwnedMutexGuard<()>>,
+  contacts_ready: bool,
 }
-
-impl Debug for UserSessionController {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("UserSessionController")
-      .field("uin", &self.uin)
-      .field("peer_addr", &self.peer_addr)
-      .finish()
-  }
-}
-
 #[derive(Error, Debug)]
 pub enum UserSessionError {
-  #[error("Client disconnected because of server shutdown")]
-  ServerShutdown,
-  #[error("Client disconnected")]
-  ClientDisconnected,
-  #[error("Authentication failed to finish in time")]
-  AuthenticateTimeout,
-  #[error("Authentication failed: invalid credentials")]
-  InvalidCredentials,
+  #[error("Connection closed or replaced")]
+  Closed,
+  #[error("Authentication failed")]
+  Authentication,
+  #[error("Connection timed out")]
+  Timeout,
+  #[error("Protocol limit exceeded")]
+  Limit,
   #[error("GG protocol error: {0}")]
-  ProtocolError(#[from] GGError),
-  #[error("Session timed out")]
-  SessionTimeout,
-  #[error("Database error: {0}")]
-  DatabaseError(#[from] sqlx::Error),
+  Protocol(#[from] GGError),
   #[error("Repository error: {0}")]
-  RepositoryError(#[from] crate::models::RepositoryError),
-  #[error("Failed to deliver message: {0}")]
-  DeliveryError(#[from] MessageDispatcherError)
+  Repository(#[from] crate::models::RepositoryError),
+  #[error("Database error")]
+  Database(#[from] sqlx::Error),
 }
-
 impl UserSessionController {
-  #[instrument(skip(stream, app_state))]
   pub fn new(stream: TcpStream, shutdown: CancellationToken, app_state: SharedAppState) -> Self {
-    let peer_addr = stream.peer_addr().expect("Well no ip in this stream WTF");
-    let protocol = Framed::new(stream, GGCodec::server());
-    let seed = rand::rng().random_range(100_000..1_000_000);
-
     Self {
-      peer_addr,
-      seed,
-      contacts: ContactBook::new(),
+      seed: rand::rng().random(),
       uin: None,
-      protocol,
-      app_state,
+      initial_presence: None,
+      contacts: ContactBook::new(),
+      protocol: Framed::new(stream, GGCodec::server()),
       shutdown,
-      presence_change_stream: None,
-      messages_stream: None,
-      initial_presence: None
+      replaced: CancellationToken::new(),
+      app_state,
+      presence_changes: None,
+      messages: None,
+      registration: None,
+      delivery_guard: None,
+      contacts_ready: false,
     }
   }
-
-  #[instrument]
+  async fn send(&mut self, packet: GGPacket) -> Result<(), UserSessionError> {
+    tokio::time::timeout(Duration::from_secs(5), self.protocol.send(packet))
+      .await
+      .map_err(|_| UserSessionError::Timeout)??;
+    Ok(())
+  }
   pub async fn establish_session(&mut self) -> Result<(), UserSessionError> {
-    tracing::info!("Sending welcome packet...");
-    self.protocol.send(GGPacket::Welcome {
-      seed: self.seed
-    }).await?;
-
-    let timeout_task = tokio::time::sleep(Duration::from_secs(60));
-    tokio::pin!(timeout_task);
-
-    loop {
-      tokio::select! {
-        _ = self.shutdown.cancelled() => {
-          tracing::debug!("Connection {} closing due to shutdown", self.peer_addr);
-          self.protocol.send(GGPacket::Disconnect).await?;
-          return Err(UserSessionError::ServerShutdown);
-        },
-
-        _ = &mut timeout_task => {
-          tracing::error!("Authentication timed out for {}", self.peer_addr);
-          self.protocol.send(GGPacket::Disconnect).await?;
-          return Err(UserSessionError::AuthenticateTimeout);
-        },
-
-        result = self.protocol.next() => {
-          match result {
-            None => {
-              tracing::info!("Connection closed from {}", self.peer_addr);
-              return Err(UserSessionError::ClientDisconnected);
-            },
-
-            Some(Err(e)) => {
-              tracing::error!("Error reading packet: {}", e);
-              return Err(UserSessionError::ProtocolError(e));
-            },
-
-            Some(Ok(GGPacket::Login60(login_info))) => {
-              tracing::info!("Received login from UIN: {}", login_info.uin);
-              let users = UserRepository::new(self.app_state.db_pool());
-
-              let user = users.find_by_uin(login_info.uin).await?;
-
-              if let Some(user) = user {
-                tracing::info!("User found for UIN: {}", login_info.uin);
-                let expected_password = gg_protocol::gg_login_hash(&user.password, self.seed);
-
-                if login_info.hash == expected_password {
-                  tracing::info!("Authentication successful for {}", self.peer_addr);
-                  let uin = login_info.uin;
-                  self.uin = Some(uin);
-                  self.initial_presence = Some(login_info.into());
-                  tracing::info!(presence = ?self.initial_presence, uin = uin, "Initial user presence");
-
-                  self.protocol.send(GGPacket::LoginOk).await?;
-                  return Ok(())
-                } else {
-                  tracing::error!("Invalid password for {}", login_info.uin);
-                  self.protocol.send(GGPacket::LoginFailed).await?;
-                  return Err(UserSessionError::InvalidCredentials)
-                }
-              } else {
-                tracing::error!("User not found for UIN: {}", login_info.uin);
-                self.protocol.send(GGPacket::LoginFailed).await?;
-                return Err(UserSessionError::InvalidCredentials);
-              }
-            },
-
-            Some(Ok(other)) => tracing::warn!("ignoring packet type: {:?}", other)
-          }
-        }
+    self.send(GGPacket::Welcome { seed: self.seed }).await?;
+    let packet = tokio::select! {
+        _ = self.shutdown.cancelled() => return Err(UserSessionError::Closed),
+        packet = tokio::time::timeout(Duration::from_secs(20), self.protocol.next()) => packet.map_err(|_| UserSessionError::Timeout)?,
+    };
+    let Some(Ok(GGPacket::Login60(login))) = packet else {
+      return Err(UserSessionError::Authentication);
+    };
+    if login
+      .description
+      .as_ref()
+      .is_some_and(|d| d.chars().count() > 70)
+    {
+      return Err(UserSessionError::Limit);
+    }
+    let user = UserRepository::new(self.app_state.db_pool())
+      .find_by_uin(login.uin)
+      .await?;
+    if let Some(user) = user {
+      use subtle::ConstantTimeEq;
+      let password = self.app_state.vault().open(&user.password, user.uin)?;
+      if bool::from(gg_protocol::gg_login_hash(&password, self.seed).ct_eq(&login.hash)) {
+        self.uin = Some(login.uin);
+        self.initial_presence = Some(login.into());
+        return Ok(());
       }
     }
+    self.send(GGPacket::LoginFailed).await?;
+    Err(UserSessionError::Authentication)
   }
-
-  #[instrument]
   pub async fn sync(&mut self) -> Result<(), UserSessionError> {
-    let current_uin = self.uin.expect("Missing uin");
-
-    self.app_state.message_dispatcher().kick(current_uin).await;
-    self.presence_change_stream = Some(self.app_state.presence_hub().register(current_uin));
-    self.messages_stream = Some(self.app_state.message_dispatcher().register(current_uin).await);
-
-    let presence = self.initial_presence.take().unwrap_or_else(|| UserPresence::available(current_uin));
-    self.app_state.presence_hub().notify(presence);
-
-    Ok(())
+    let uin = self.uin.ok_or(UserSessionError::Authentication)?;
+    let (id, messages, replaced, guard) = self.app_state.message_dispatcher().register(uin).await;
+    self.registration = Some(id);
+    self.messages = Some(messages);
+    self.replaced = replaced;
+    self.delivery_guard = Some(guard);
+    if self.replaced.is_cancelled() {
+      return Err(UserSessionError::Closed);
+    }
+    self.presence_changes = Some(self.app_state.presence_hub().register(uin));
+    self.app_state.presence_hub().notify(
+      self
+        .initial_presence
+        .take()
+        .unwrap_or_else(|| UserPresence::available(uin)),
+    );
+    self.send(GGPacket::LoginOk).await
   }
-
-  #[instrument]
-  async fn deliver_pending_messages(&mut self) -> Result<(), UserSessionError> {
-    let current_uin = self.uin.expect("Missing uin");
-
+  async fn deliver_pending(&mut self) -> Result<(), UserSessionError> {
+    if !self.contacts_ready {
+      return Ok(());
+    }
+    let uin = self.uin.ok_or(UserSessionError::Authentication)?;
     let messages = MessageRepository::new(self.app_state.db_pool());
-
-    tracing::info!(uin = ?current_uin, "Starting pending message synchronization");
-    let mut total_delivered = 0u32;
-
-    while let Some(pending_messages) = messages.find_pending(current_uin).await? {
-      let batch_size = pending_messages.len();
-      tracing::debug!(uin = ?current_uin, batch_size, "Processing pending message batch");
-
-      let mut delivered = Vec::new();
-      for msg in pending_messages {
-        let msg_id = msg.id;
-        if self.contacts.is_blocked(msg.sender_uin) {
-          tracing::debug!(msg_id, sender = msg.sender_uin, uin = ?current_uin, "blocking pending message");
-        } else {
-          tracing::debug!(msg_id, sender = msg.sender_uin, uin = ?current_uin, "Delivering pending message");
-          self.protocol.send(GGPacket::RecvMessage(msg.into())).await?;
+    if let Some(batch) = messages.find_pending(uin).await? {
+      for message in batch {
+        if self.replaced.is_cancelled() || self.shutdown.is_cancelled() {
+          return Err(UserSessionError::Closed);
         }
-        delivered.push(msg_id);
+        let id = message.id;
+        if !self.contacts.is_blocked(message.sender_uin) {
+          self.send(GGPacket::RecvMessage(message.into())).await?;
+        }
+        // Each successful socket write is recorded separately; GG6 has no receipt ACK.
+        messages.mark_single_delivered(id).await?;
       }
-
-      messages.mark_delivered(&delivered).await?;
-      total_delivered += batch_size as u32;
-      tracing::debug!(uin = ?current_uin, batch_size, total_delivered, "Batch delivered and marked");
     }
-
-    tracing::info!(uin = ?current_uin, total_delivered, "Pending message synchronization complete");
     Ok(())
   }
-
-  #[instrument]
-  pub async fn run(&mut self) -> Result<(), UserSessionError> {
-    let mut contacts: Vec<ContactEntry> = Vec::new();
-    let current_uin = self.uin.expect("Missing uin");
-    tracing::info!("Starting user session for {}", current_uin);
-
-    loop {
-      let presence_change_stream = self.presence_change_stream.as_mut().expect("Presence subscription not set");
-      let messages_stream = self.messages_stream.as_mut().expect("Message subscription not set");
-
-      tokio::select! {
-        _ = self.shutdown.cancelled() => {
-          tracing::info!("User session {} shutting down...", current_uin);
-          self.protocol.send(GGPacket::Disconnect).await?;
-          self.protocol.flush().await?;
-          break;
-        },
-
-        _ = tokio::time::sleep(Duration::from_mins(5)) => {
-          tracing::error!("User timeout");
-          return Err(UserSessionError::SessionTimeout);
-        },
-
-        Some(session_msg) = messages_stream.next() => {
-          match session_msg {
-            SessionMessage::Disconnect => {
-              tracing::info!(uin = ?current_uin, "already signed in, kicking current session");
-              self.protocol.send(GGPacket::Disconnect).await?;
-              break;
-            },
-
-            SessionMessage::QueuedMessage(msg_id) => {
-              tracing::info!(msg_id = msg_id, uin = ?current_uin, "delivering message");
-
-              let messages = MessageRepository::new(self.app_state.db_pool());
-              if let Some(message) = messages.find_one_pending(msg_id).await? {
-                if self.contacts.is_blocked(message.sender_uin) {
-                  tracing::error!(sender = message.sender_uin, uin = current_uin, "is blocked, skipping message delivery");
-                } else {
-                  self.protocol.send(GGPacket::RecvMessage(message.into())).await?;
-                }
-
-                messages.mark_single_delivered(msg_id).await?;
-              } else {
-                tracing::error!(msg_id = msg_id, "message already delivered");
-              }
-            }
-          }
-        },
-
-        Some(uin) = presence_change_stream.next() => {
-          let presence = self.app_state.presence_hub().find(&uin);
-          tracing::info!(presence = ?presence, uin = ?current_uin, "Presence changed, sending new presence to client");
-          self.protocol.send(GGPacket::Status60(presence.into())).await?;
-        },
-
-        result = self.protocol.next() => {
-          match result {
-            None => {
-              tracing::info!("Connection closed from {}", current_uin);
-              return Err(UserSessionError::ClientDisconnected);
-            },
-
-            Some(Ok(GGPacket::Disconnect)) => {
-              tracing::info!("Connection closed from {}", current_uin);
-              return Err(UserSessionError::ClientDisconnected);
-            },
-
-            Some(Ok(GGPacket::SendMessage(incoming_message))) => {
-              tracing::info!(incoming_message = ?incoming_message, uin = current_uin, "received message, relaying it to recipient");
-
-              let recipient = incoming_message.recipient;
-              let seq = incoming_message.seq;
-              let status = self.app_state.message_dispatcher().dispatch(current_uin, incoming_message).await?;
-              self.protocol.send(GGPacket::SendMessageAck(GGSendMessageAck { seq, status, recipient })).await?;
-            },
-
-            Some(Ok(GGPacket::NewStatus(new_status))) => {
-              tracing::info!(uin = current_uin, status = ?new_status, "client changed status, sending info to other contacts");
-              let presence = UserPresence {
-                status: new_status.status,
-                uin: current_uin,
-                description: new_status.description,
-                time: new_status.time
-              };
-              self.app_state.presence_hub().notify(presence);
-            },
-
-            Some(Ok(GGPacket::ListEmpty)) => {
-              tracing::info!(uin = current_uin, "client has empty contact list");
-              self.deliver_pending_messages().await?;
-            },
-
-            Some(Ok(GGPacket::Ping)) => {
-              tracing::info!(uin = current_uin, "received ping, sending pong");
-              self.protocol.send(GGPacket::Pong).await?;
-            },
-
-            Some(Ok(GGPacket::NotifyFirst(new_contacts))) => {
-              tracing::info!(uin = current_uin, count = new_contacts.len(), "received first batch of contacts");
-              contacts.extend(new_contacts);
-            },
-
-            Some(Ok(GGPacket::NotifyLast(last_contacts))) => {
-              tracing::info!(uin = current_uin, count = last_contacts.len(), total = contacts.len() + last_contacts.len(), "received last batch of contacts, processing contact list");
-              contacts.extend(last_contacts);
-              self.handle_contact_list(&contacts).await?;
-              contacts.clear();
-              self.deliver_pending_messages().await?;
-            },
-
-            _ => {
-              tracing::info!("Ignoring packet type: {:?}", result);
-            }
-          }
-        }
-      }
+  async fn sync_contacts(&mut self, contacts: &[ContactEntry]) -> Result<(), UserSessionError> {
+    if contacts.len() > 1000 {
+      return Err(UserSessionError::Limit);
     }
-
-    return Ok(())
-  }
-
-  #[instrument]
-  async fn handle_contact_list(&mut self, contacts: &Vec<ContactEntry>) -> Result<(), UserSessionError> {
-    let current_uin = self.uin.expect("Missing uin");
-    let users = UserRepository::new(self.app_state.db_pool());
-    let friends = contacts.iter()
-      .filter(|u| u.user_type != ContactType::Blocked)
-      .map(|u| u.uin)
-      .collect::<Vec<GGNumber>>();
-    let existing_users = users.find_by_uins(&friends).await?
-      .iter()
-      .map(|u| u.uin)
-      .collect::<Vec<GGNumber>>();
+    let uin = self.uin.ok_or(UserSessionError::Authentication)?;
     self.contacts.set(contacts);
-
-    tracing::info!("Sending contact list to {}: {} friends, and filtered from: {}", current_uin, existing_users.len(), friends.len());
-
-    let presence_hub = self.app_state.presence_hub();
-    presence_hub.subscribe(current_uin, &existing_users);
-
-    let presences = existing_users.iter()
-      .map(|uin| self.app_state.presence_hub().find(uin).into())
-      .collect::<Vec<ContactStatus>>();
-
-    self.protocol.send(GGPacket::NotifyReply60(presences)).await?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    self.app_state.presence_hub().refresh(current_uin);
-
+    self.app_state.presence_hub().set_book(uin, &self.contacts);
+    self.contacts_ready = true;
+    let statuses = self
+      .contacts
+      .watched()
+      .into_iter()
+      .map(|other| self.app_state.presence_hub().find_for(other, uin).into())
+      .collect();
+    self.send(GGPacket::NotifyReply60(statuses)).await?;
+    self.deliver_pending().await
+  }
+  async fn user_list(&mut self, kind: u8, data: Vec<u8>) -> Result<(), UserSessionError> {
+    let uin = self.uin.ok_or(UserSessionError::Authentication)?;
+    match kind {
+      0 | 1 => {
+        if data.len() > 2047 {
+          return Err(UserSessionError::Limit);
+        }
+        // GG6 acknowledges every chunk; there is no final-chunk flag on upload.
+        if kind == 0 {
+          sqlx::query("INSERT INTO contact_lists(uin,data) VALUES (?,?) ON CONFLICT(uin) DO UPDATE SET data=excluded.data, updated_at=CURRENT_TIMESTAMP")
+                        .bind(uin).bind(&data).execute(self.app_state.db_pool()).await?;
+        } else {
+          let result = sqlx::query("UPDATE contact_lists SET data=CAST(data || ? AS BLOB), updated_at=CURRENT_TIMESTAMP WHERE uin=? AND length(data)+? <= 262144")
+                        .bind(&data).bind(uin).bind(data.len() as i64).execute(self.app_state.db_pool()).await?;
+          if result.rows_affected() != 1 {
+            return Err(UserSessionError::Limit);
+          }
+        }
+        self
+          .send(GGPacket::UserListReply {
+            kind: if kind == 0 { 0 } else { 2 },
+            data: vec![],
+          })
+          .await?;
+      }
+      2 => {
+        let stored: Option<Vec<u8>> =
+          sqlx::query_scalar("SELECT data FROM contact_lists WHERE uin=?")
+            .bind(uin)
+            .fetch_optional(self.app_state.db_pool())
+            .await?;
+        let stored = stored.unwrap_or_default();
+        if stored.is_empty() {
+          self
+            .send(GGPacket::UserListReply {
+              kind: 6,
+              data: vec![],
+            })
+            .await?;
+        } else {
+          let total = stored.len().div_ceil(2047);
+          for (index, chunk) in stored.chunks(2047).enumerate() {
+            self
+              .send(GGPacket::UserListReply {
+                kind: if index + 1 == total { 6 } else { 4 },
+                data: chunk.to_vec(),
+              })
+              .await?;
+          }
+        }
+      }
+      _ => return Err(UserSessionError::Limit),
+    }
     Ok(())
   }
-
-  #[instrument]
-  pub async fn cleanup(&mut self) {
-    tracing::info!(uin = ?self.uin, "Cleaning up user session");
-
-    self.presence_change_stream = None;
-    if let Some(uin) = self.uin {
-      self.app_state.message_dispatcher().unregister(uin).await;
-      self.app_state.presence_hub().notify(UserPresence::offline(uin));
-      self.app_state.presence_hub().unregister(uin, &[uin]); // todo: track contact uids
+  pub async fn run(&mut self) -> Result<(), UserSessionError> {
+    let uin = self.uin.ok_or(UserSessionError::Authentication)?;
+    let mut contacts = Vec::new();
+    let mut poll = tokio::time::interval(Duration::from_secs(2));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_packet = Instant::now();
+    let mut rate_window = Instant::now();
+    let mut packet_count = 0u32;
+    let mut message_count = 0u32;
+    loop {
+      tokio::select! {
+          _ = self.shutdown.cancelled() => break,
+          _ = self.replaced.cancelled() => break,
+          _ = poll.tick() => {
+              if last_packet.elapsed() > Duration::from_secs(300) { return Err(UserSessionError::Timeout); }
+              self.deliver_pending().await?;
+          }
+          Some(()) = self.messages.as_mut().unwrap().next() => self.deliver_pending().await?,
+          Some(other) = self.presence_changes.as_mut().unwrap().next() => {
+              let status = self.app_state.presence_hub().find_for(other, uin);
+              self.send(GGPacket::Status60(status.into())).await?;
+          }
+          packet = self.protocol.next() => {
+              let packet = packet.ok_or(UserSessionError::Closed)??;
+              last_packet = Instant::now();
+              if rate_window.elapsed() >= Duration::from_secs(60) { rate_window = Instant::now(); packet_count = 0; message_count = 0; }
+              packet_count += 1;
+              if packet_count > 600 { return Err(UserSessionError::Limit); }
+              match packet {
+                  GGPacket::Ping => self.send(GGPacket::Pong).await?,
+                  GGPacket::SendMessage(message) => {
+                      message_count += 1;
+                      if message_count > 300 { return Err(UserSessionError::Limit); }
+                      let recipient = message.recipient; let seq = message.seq;
+                      let status = self.app_state.message_dispatcher().dispatch(uin, message).await?;
+                      self.send(GGPacket::SendMessageAck(GGSendMessageAck { recipient, seq, status })).await?;
+                  }
+                  GGPacket::ListEmpty => {
+                      contacts.clear(); self.contacts.set(&[]);
+                      self.app_state.presence_hub().set_book(uin, &self.contacts);
+                      self.contacts_ready = true; self.deliver_pending().await?;
+                  }
+                  GGPacket::NotifyFirst(batch) => {
+                      if contacts.len() + batch.len() > 1000 { return Err(UserSessionError::Limit); }
+                      contacts.extend(batch);
+                  }
+                  GGPacket::NotifyLast(batch) => {
+                      if contacts.len() + batch.len() > 1000 { return Err(UserSessionError::Limit); }
+                      contacts.extend(batch); self.sync_contacts(&contacts).await?; contacts.clear();
+                  }
+                  GGPacket::AddNotify(entry) => {
+                      self.contacts.add(&entry); let entries = self.contacts.entries(); self.sync_contacts(&entries).await?;
+                  }
+                  GGPacket::RemoveNotify(entry) => {
+                      self.contacts.remove(&entry); let entries = self.contacts.entries(); self.sync_contacts(&entries).await?;
+                  }
+                  GGPacket::NewStatus(status) => {
+                      if status.description.as_ref().is_some_and(|d| d.chars().count() > 70) { return Err(UserSessionError::Limit); }
+                      self.app_state.presence_hub().notify(UserPresence { uin, status: status.status, description: status.description, time: status.time });
+                  }
+                  GGPacket::UserListRequest { kind, data } => self.user_list(kind, data).await?,
+                  GGPacket::Disconnect => break,
+                  _ => {} // Unknown extensions contain no decoded user text in logs.
+              }
+          }
+      }
     }
-    let _ =self.protocol.flush().await;
+    let _ = self.send(GGPacket::Disconnect).await;
+    Ok(())
+  }
+  pub async fn cleanup(&mut self) {
+    if let (Some(uin), Some(id)) = (self.uin, self.registration.take()) {
+      // Still holding the account delivery guard: successor cannot publish presence yet.
+      self.app_state.presence_hub().unregister(uin, &[]);
+      self.app_state.message_dispatcher().unregister(uin, id);
+    }
+    self.delivery_guard.take();
   }
 }

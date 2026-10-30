@@ -1,11 +1,11 @@
 //! Helper functions for GG protocol codec encoding/decoding.
 
-use std::borrow::Cow;
-use std::net::Ipv4Addr;
-use bytes::{Buf, BufMut, BytesMut};
-use encoding_rs::WINDOWS_1250;
 use crate::consts::{font, status_has_description};
 use crate::packets::{ContactEntry, ContactStatus, ContactType, RgbColor, RichTextFormat};
+use bytes::{Buf, BufMut, BytesMut};
+use encoding_rs::WINDOWS_1250;
+use std::borrow::Cow;
+use std::net::Ipv4Addr;
 
 /// Decode CP1250 (Windows-1250) bytes to a Rust String.
 pub fn decode_cp1250(bytes: &[u8]) -> String {
@@ -36,7 +36,8 @@ pub fn decode_contact_entries(src: &mut BytesMut, length: usize) -> Vec<ContactE
 pub fn decode_contact_statuses(src: &mut BytesMut, mut length: usize) -> Vec<ContactStatus> {
   let mut statuses = Vec::new();
 
-  while length >= 14 { // base size: 4 + 1 + 4 + 2 + 1 + 1 + 1 = 14 bytes
+  while length >= 14 {
+    // base size: 4 + 1 + 4 + 2 + 1 + 1 + 1 = 14 bytes
     let uin_with_flags = src.get_u32_le();
     let uin = uin_with_flags & 0x00FFFFFF;
     let flags = ((uin_with_flags >> 24) & 0xFF) as u8;
@@ -61,7 +62,11 @@ pub fn decode_contact_statuses(src: &mut BytesMut, mut length: usize) -> Vec<Con
         // Check if there's time at the end (need at least 5 bytes: 1 null + 4 time)
         let has_time = description_size >= 5;
         // desc_len = total - null terminator - time (if present)
-        let desc_len = if has_time { description_size - 5 } else { description_size.saturating_sub(1) };
+        let desc_len = if has_time {
+          description_size - 5
+        } else {
+          description_size.saturating_sub(1)
+        };
 
         let desc = if desc_len > 0 {
           let d = decode_cp1250(&src[..desc_len]);
@@ -190,7 +195,10 @@ pub fn encode_richtext_formatting(formats: &[RichTextFormat]) -> BytesMut {
 
 /// Decode rich text formatting from message payload.
 /// `remaining` is the number of bytes after the message null terminator.
-pub fn decode_richtext_formatting(src: &mut BytesMut, remaining: usize) -> Option<Vec<RichTextFormat>> {
+pub fn decode_richtext_formatting(
+  src: &mut BytesMut,
+  remaining: usize,
+) -> Option<Vec<RichTextFormat>> {
   if remaining < 3 {
     return None;
   }
@@ -216,12 +224,15 @@ pub fn decode_richtext_formatting(src: &mut BytesMut, remaining: usize) -> Optio
   let mut formats = Vec::new();
   let mut bytes_read = 0;
 
-  while bytes_read < formats_len && src.len() >= 3 {
+  while bytes_read + 3 <= formats_len && src.len() >= 3 {
     let position = src.get_u16_le();
     let font_byte = src.get_u8();
     bytes_read += 3;
 
-    let color = if (font_byte & font::GG_FONT_COLOR) != 0 && src.len() >= 3 && bytes_read + 3 <= formats_len {
+    let color = if (font_byte & font::GG_FONT_COLOR) != 0
+      && src.len() >= 3
+      && bytes_read + 3 <= formats_len
+    {
       let r = src.get_u8();
       let g = src.get_u8();
       let b = src.get_u8();

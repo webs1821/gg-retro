@@ -13,15 +13,15 @@ mod register;
 mod sendpwd;
 mod web;
 
-use std::fmt::{Display, Formatter};
-use axum::response::IntoResponse;
+use crate::core::SharedAppState;
 use axum::Router;
+use axum::response::IntoResponse;
+use std::fmt::{Display, Formatter};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::{TraceLayer, DefaultMakeSpan, DefaultOnResponse};
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
-use crate::core::SharedAppState;
 
 #[derive(Debug, Error)]
 pub enum ApiRequestError {
@@ -38,13 +38,19 @@ impl Display for ApiRequestError {
 
 impl IntoResponse for ApiRequestError {
   fn into_response(self) -> axum::response::Response {
-    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, (), self.to_string()).into_response()
+    (
+      axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+      (),
+      self.to_string(),
+    )
+      .into_response()
   }
 }
 
 /// Create the HTTP router with all GG protocol endpoints.
 pub fn router(app_state: SharedAppState) -> Router {
   Router::new()
+    .route("/healthz", axum::routing::get(health))
     .merge(web::router())
     .merge(appmsg::router())
     .merge(captcha::router())
@@ -52,9 +58,10 @@ pub fn router(app_state: SharedAppState) -> Router {
     .merge(sendpwd::router())
     .layer(
       TraceLayer::new_for_http()
-        .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+        .make_span_with(|request: &axum::http::Request<axum::body::Body>| tracing::info_span!("http", method = %request.method(), path = %request.uri().path()))
         .on_response(DefaultOnResponse::new().level(Level::INFO))
     )
+    .layer(axum::extract::DefaultBodyLimit::max(8192))
     .with_state(app_state)
 }
 
@@ -73,4 +80,18 @@ pub async fn http_server(
     })
     .await?;
   Ok(())
+}
+
+async fn health(
+  axum::extract::State(state): axum::extract::State<SharedAppState>,
+) -> axum::http::StatusCode {
+  if sqlx::query("SELECT 1")
+    .execute(state.db_pool())
+    .await
+    .is_ok()
+  {
+    axum::http::StatusCode::OK
+  } else {
+    axum::http::StatusCode::SERVICE_UNAVAILABLE
+  }
 }

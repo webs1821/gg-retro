@@ -3,34 +3,36 @@
 //! These packets are sent by the client after login to inform the server
 //! about the contact list. The list is split into chunks of max 400 entries.
 
-use std::net::Ipv4Addr;
 use crate::consts::{GGNumber, GGStatus};
+use std::net::Ipv4Addr;
 
-/// Type of user in the contact list.
+/// Wire bit field: combinations must survive decoding and forwarding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum ContactType {
-  /// Regular contact.
-  Buddy = 0x01,
-  /// Friend visible in "friends only" mode.
-  Friend = 0x02,
-  /// Blocked user.
-  Blocked = 0x04,
+pub struct ContactType(u8);
+#[allow(non_upper_case_globals)]
+impl ContactType {
+  pub const Buddy: Self = Self(1);
+  pub const Friend: Self = Self(2);
+  pub const Blocked: Self = Self(4);
+  pub fn bits(self) -> u8 {
+    self.0
+  }
 }
-
+impl Default for ContactType {
+  fn default() -> Self {
+    Self::Buddy
+  }
+}
 impl TryFrom<u8> for ContactType {
   type Error = u8;
-
   fn try_from(value: u8) -> Result<Self, Self::Error> {
-    match value {
-      0x01 => Ok(ContactType::Buddy),
-      0x02 => Ok(ContactType::Friend),
-      0x04 => Ok(ContactType::Blocked),
-      _ => Err(value),
+    if value & !7 == 0 {
+      Ok(Self(value))
+    } else {
+      Err(value)
     }
   }
 }
-
 /// Single entry in the contact list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContactEntry {

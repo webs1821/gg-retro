@@ -23,10 +23,11 @@
     </div>
 
     <div class="sidebar">
-      <div class="sidebar-tab active" onclick="showSection('about')">O projekcie</div>
-      <div class="sidebar-tab" onclick="showSection('features')">Funkcje</div>
-      <div class="sidebar-tab" onclick="showSection('patcher')">Patcher</div>
-      <div class="sidebar-tab" onclick="showSection('download')">Pobierz</div>
+      <div class="sidebar-tab active" onclick="showSection(event, 'about')">O projekcie</div>
+      <div class="sidebar-tab" onclick="showSection(event, 'features')">Funkcje</div>
+      <div class="sidebar-tab" onclick="showSection(event, 'register')">Załóż konto</div>
+      <div class="sidebar-tab" onclick="showSection(event, 'patcher')">Patcher</div>
+      <div class="sidebar-tab" onclick="showSection(event, 'download')">Pobierz</div>
     </div>
 
     <div class="content">
@@ -76,7 +77,7 @@
           <ul>
             <li>Baza danych SQLite z trybem WAL</li>
             <li>Port 8074: Protokół GG (TCP)</li>
-            <li>Port 80: API HTTP (rejestracja, CAPTCHA, discovery)</li>
+            <li>HTTPS: rejestracja i strona; HTTP: wykrywanie serwera przez GG 6.1</li>
             <li>Niskie zużycie zasobów</li>
           </ul>
 
@@ -87,6 +88,25 @@
             <li>Przypomnienie hasła (email)</li>
           </ul>
         </div>
+      </div>
+
+      <div id="register" class="section">
+        <h1>Załóż konto na {{ hostname }}</h1>
+        <p>Poproś właściciela o kod zaproszenia. Otrzymasz nowy numer GG, działający tylko na tym serwerze.</p>
+        <div class="info-box">Klient GG 6.1 przesyła rozmowy bez szyfrowania. Użyj osobnego hasła, którego nie stosujesz w innych usługach.</div>
+        <form id="registerForm">
+          <div class="form-group"><label for="invite">Kod zaproszenia</label><input id="invite" name="invite" type="password" autocomplete="off" required maxlength="128"></div>
+          <div class="form-group"><label for="email">E-mail</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="254"></div>
+          <div class="form-group"><label for="pwd">Hasło: 8–15 znaków ASCII, bez spacji</label><input id="pwd" name="pwd" type="password" autocomplete="new-password" required minlength="8" maxlength="15" pattern="[!-~]{8,15}"></div>
+          <div class="form-group"><img id="captchaImage" alt="Kod z obrazka"><button id="refreshCaptcha" class="button" type="button">Nowy obrazek</button></div>
+          <div class="form-group"><label for="tokenval">Kod z obrazka</label><input id="tokenval" name="tokenval" required maxlength="4" autocomplete="off"></div>
+          <input id="tokenid" name="tokenid" type="hidden">
+          <button class="button" type="submit">Załóż konto</button>
+        </form>
+        <p id="registerStatus" role="status"></p>
+        <h2>Po rejestracji</h2>
+        <ol><li>Zainstaluj GG 6.1 z zakładki „Pobierz”.</li><li>W zakładce „Patcher” wybierz plik <strong>gg.exe z katalogu instalacji</strong>, nie instalator gg61.exe. Zapisz zmodyfikowaną kopię w tym samym katalogu.</li><li>Uruchom zmodyfikowany plik. Wybierz istniejący numer i wpisz otrzymany tutaj numer oraz hasło.</li></ol>
+        <p>Wiadomości do nieobecnej osoby czekają na serwerze i przychodzą po jej zalogowaniu. E-mail służy identyfikacji konta; automatyczne odzyskiwanie hasła nie jest dostępne.</p>
       </div>
 
       <div id="patcher" class="section">
@@ -106,7 +126,7 @@
 
           <div class="form-group">
             <label>2. Adres serwera (max 16 znaków):</label>
-            <input type="text" id="serverAddress" value="gg-retro.local" placeholder="np. gg.local" maxlength="16">
+            <input type="text" id="serverAddress" value="{{ hostname }}" placeholder="np. gg.local" maxlength="16">
           </div>
 
           <button type="submit" class="button">Patchuj plik</button>
@@ -136,8 +156,8 @@
 
         <h2>Dokumentacja</h2>
         <ul>
-          <li><a href="https://github.com/macbury/gg-retro">Kod źródłowy (GitHub)</a></li>
-          <li><a href="https://libgadu.net/protocol/">Dokumentacja protokołu GG</a></li>
+          <li><a href="https://github.com/webs1821/gg-retro">Kod źródłowy (GitHub)</a></li>
+          <li><a href="https://libgadu.github.io/protocol/">Dokumentacja protokołu GG</a></li>
         </ul>
       </div>
     </div>
@@ -145,6 +165,7 @@
 </div>
 
 <script src="/static/main.js"></script>
+<script src="/static/register.js"></script>
 <script src="/static/patcher.js"></script>
 </body>
 </html>

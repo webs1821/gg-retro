@@ -2,18 +2,18 @@
 //!
 //! Serves the landing page and static assets like logo.
 
+use crate::api::ApiRequestError;
+use crate::core::SharedAppState;
 use askama::Template;
 use axum::{
   Router,
+  extract::{Query, State},
   response::{Html, IntoResponse},
   routing::get,
-  extract::{State, Query},
 };
-use serde::Deserialize;
 use axum_embed::ServeEmbed;
 use rust_embed::RustEmbed;
-use crate::api::ApiRequestError;
-use crate::core::SharedAppState;
+use serde::Deserialize;
 
 /// Embedded static assets from the static directory.
 #[derive(RustEmbed, Clone)]
@@ -36,6 +36,7 @@ struct IndexQuery {
 #[template(path = "home.html")]
 struct HomeTemplate<'a> {
   online: usize,
+  hostname: &'a str,
   version: &'a str,
   gg61_sha256: &'a str,
 }
@@ -56,6 +57,7 @@ async fn index(
 
   let template = HomeTemplate {
     online: app_state.presence_hub().online(),
+    hostname: app_state.config().hostname(),
     version: VERSION,
     gg61_sha256: GG61_SHA256,
   };

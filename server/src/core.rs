@@ -1,14 +1,17 @@
-use std::net::IpAddr;
-use std::sync::Arc;
-use axum::http;
-use axum::http::Uri;
-use figment::Figment;
-use figment::providers::{Env, Format, Serialized, Toml};
-use local_ip_address::local_ip;
+use crate::{
+  messenger::{MessageDispatcher, PresenceHub},
+  models::DatabasePool,
+  security::{Admission, PasswordVault},
+};
+use axum::{http, http::Uri};
+use figment::{
+  Figment,
+  providers::{Env, Format, Serialized, Toml},
+};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use crate::messenger::{MessageDispatcher, PresenceHub};
-use crate::models::DatabasePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use std::{net::IpAddr, sync::Arc, time::Duration};
+use zeroize::Zeroizing;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct ServerConfig {
@@ -17,108 +20,150 @@ pub struct ServerConfig {
   gg_port: u16,
   db: String,
   hostname: String,
+  pub advertised_ip: Option<IpAddr>,
+  pub advertised_port: u16,
+  public_scheme: String,
+  password_key_file: String,
+  registration_invite_file: String,
+  migrate_plaintext_passwords: bool,
 }
-
 impl Default for ServerConfig {
   fn default() -> Self {
     Self {
-      bind: "0.0.0.0".to_string(),
-      http_port: 80,
+      bind: "127.0.0.1".into(),
+      http_port: 8080,
       gg_port: 8074,
-      db: "./gg.db".to_string(),
-      hostname: "gg-retro.local".to_string(),
+      db: "./gg.db".into(),
+      hostname: "gg-retro.local".into(),
+      advertised_ip: None,
+      advertised_port: 8074,
+      public_scheme: "https".into(),
+      password_key_file: "./secrets/password.key".into(),
+      registration_invite_file: "./secrets/registration-invite.txt".into(),
+      migrate_plaintext_passwords: false,
     }
   }
 }
-
 impl ServerConfig {
   pub fn api_bind(&self) -> String {
     format!("{}:{}", self.bind, self.http_port)
   }
-
   pub fn gg_bind(&self) -> String {
     format!("{}:{}", self.bind, self.gg_port)
   }
-
   pub fn hostname(&self) -> &str {
     &self.hostname
   }
 }
-
-/// Shared application state containing resources needed across the server.
-#[derive(Debug)]
 pub struct AppState {
   db_pool: DatabasePool,
   pub host_ip: IpAddr,
   presence_hub: PresenceHub,
   message_dispatcher: MessageDispatcher,
-  config: ServerConfig
+  config: ServerConfig,
+  vault: PasswordVault,
+  invite: Zeroizing<String>,
+  pub admission: Arc<Admission>,
 }
-
 impl AppState {
-  /// Get a reference to the database pool.
   pub fn db_pool(&self) -> &DatabasePool {
     &self.db_pool
   }
-
   pub fn config(&self) -> &ServerConfig {
     &self.config
   }
-
   pub fn presence_hub(&self) -> &PresenceHub {
     &self.presence_hub
   }
-
   pub fn message_dispatcher(&self) -> &MessageDispatcher {
     &self.message_dispatcher
   }
-
+  pub fn vault(&self) -> &PasswordVault {
+    &self.vault
+  }
+  pub fn invite_matches(&self, offered: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    self.invite.as_bytes().ct_eq(offered.as_bytes()).into()
+  }
   pub fn host_uri(&self, path: &str) -> Result<Uri, http::Error> {
-    Ok(Uri::builder()
-        .scheme("http")
-        .authority(self.config.hostname())
-        .path_and_query(path)
-        .build()?)
+    Uri::builder()
+      .scheme(self.config.public_scheme.as_str())
+      .authority(self.config.hostname())
+      .path_and_query(path)
+      .build()
   }
 }
-
 pub type SharedAppState = Arc<AppState>;
-
 pub async fn create_app_state() -> Result<SharedAppState, Box<dyn std::error::Error>> {
-  let config : ServerConfig = Figment::new()
+  let config: ServerConfig = Figment::new()
     .merge(Toml::file("/etc/gg-retro/config.toml"))
     .merge(Toml::file("config.toml"))
     .merge(Env::prefixed("GG_"))
     .join(Serialized::defaults(ServerConfig::default()))
     .extract()?;
-
-  tracing::info!(db = config.db, "Starting GG server, preparing database...");
+  let key = Zeroizing::new(std::fs::read(&config.password_key_file)?);
+  let vault = PasswordVault::new(&key)?;
+  let invite = Zeroizing::new(
+    std::fs::read_to_string(&config.registration_invite_file)?
+      .trim()
+      .to_owned(),
+  );
+  if invite.len() < 24 {
+    return Err("registration invite must contain at least 24 characters".into());
+  }
+  if !matches!(config.public_scheme.as_str(), "http" | "https") {
+    return Err("invalid public scheme".into());
+  }
   let db_options = SqliteConnectOptions::new()
-    .filename(config.db.clone())
+    .filename(&config.db)
     .create_if_missing(true)
-    .journal_mode(SqliteJournalMode::Wal);
-
+    .journal_mode(SqliteJournalMode::Wal)
+    .synchronous(SqliteSynchronous::Full)
+    .busy_timeout(Duration::from_secs(5))
+    .foreign_keys(true);
   let db_pool = SqlitePoolOptions::new()
-    .max_connections(32)
+    .max_connections(4)
     .connect_with(db_options)
     .await?;
-
   sqlx::migrate!("./migrations").run(&db_pool).await?;
-  tracing::info!("Database ready");
-
-  let host_ip = local_ip()?;
-  let presence_hub = PresenceHub::new();
+  let mut tx = db_pool.begin().await?;
+  let credentials: Vec<(u32, String)> = sqlx::query_as("SELECT uin, password FROM users")
+    .fetch_all(&mut *tx)
+    .await?;
+  for (uin, password) in credentials {
+    let password = Zeroizing::new(password);
+    if password.starts_with("ggv1:") {
+      vault.open(&password, uin)?;
+    } else if config.migrate_plaintext_passwords {
+      sqlx::query("UPDATE users SET password = ? WHERE uin = ?")
+        .bind(vault.seal(&password, uin)?)
+        .bind(uin)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+      return Err("Legacy plaintext credentials found: back up the database/key and explicitly enable migrate_plaintext_passwords once".into());
+    }
+  }
+  tx.commit().await?;
+  if config.migrate_plaintext_passwords {
+    sqlx::query("VACUUM").execute(&db_pool).await?;
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+      .execute(&db_pool)
+      .await?;
+  }
+  let host_ip = match config.advertised_ip {
+    Some(ip) => ip,
+    None => local_ip_address::local_ip()?,
+  };
   let message_dispatcher = MessageDispatcher::new(&db_pool);
-
-  Ok(
-    Arc::new(
-      AppState {
-        db_pool,
-        host_ip,
-        presence_hub,
-        message_dispatcher,
-        config
-      }
-    )
-  )
+  Ok(Arc::new(AppState {
+    db_pool,
+    host_ip,
+    presence_hub: PresenceHub::new(),
+    message_dispatcher,
+    config,
+    vault,
+    invite,
+    admission: Arc::new(Admission::default()),
+  }))
 }

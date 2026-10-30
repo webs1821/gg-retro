@@ -1,10 +1,10 @@
 // GG-Retro UI
 
-function showSection(sectionId) {
+function showSection(event, sectionId) {
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
   document.getElementById(sectionId).classList.add('active');
-  event.target.classList.add('active');
+  event.currentTarget.classList.add('active');
 }
 
 // Window dragging (desktop only)

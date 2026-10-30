@@ -2,14 +2,15 @@
 //!
 //! `/appsvc/fmregister3.asp` - Handles account registration, deletion, and password changes.
 
-use axum::{Router, routing::post, Form, extract::State};
-use serde::Deserialize;
 use crate::core::SharedAppState;
 use crate::models::{RepositoryError, TokenRepository, UserRepository};
+use axum::{Form, Router, extract::State, routing::post};
+use serde::Deserialize;
 
 /// Form fields for account operations.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RegisterForm {
+  pub invite: Option<String>,
   /// New password (for registration/change).
   pub pwd: Option<String>,
   /// Email address.
@@ -18,14 +19,8 @@ pub struct RegisterForm {
   pub tokenid: Option<String>,
   /// User-entered token value (captcha answer).
   pub tokenval: Option<String>,
-  /// Hash code for verification.
-  pub code: Option<String>,
   /// GG number (for existing account operations).
   pub fmnumber: Option<u32>,
-  /// Current password (for account changes).
-  pub fmpwd: Option<String>,
-  /// Set to "1" to delete account.
-  pub delete: Option<String>,
 }
 
 /// Handle account registration, deletion, or password change.
@@ -39,27 +34,51 @@ pub struct RegisterForm {
 ///
 /// **Password Change:**
 /// - Required: `fmnumber`, `fmpwd`, `pwd`, `email`, `tokenid`, `tokenval`, `code`
-#[tracing::instrument(skip(app_state))]
+#[tracing::instrument(skip_all)]
 pub async fn register(
   State(app_state): State<SharedAppState>,
-  Form(form): Form<RegisterForm>
+  Form(form): Form<RegisterForm>,
 ) -> Result<String, RepositoryError> {
+  if !app_state.invite_matches(form.invite.as_deref().unwrap_or("")) {
+    return Ok("reg_failed".into());
+  }
   let users = UserRepository::new(app_state.db_pool());
   let tokens = TokenRepository::new(app_state.db_pool());
 
   // Registration: no fmnumber means new account
   if form.fmnumber.is_none() {
-    if let (Some(pwd), Some(email), Some(tokenid), Some(captcha_code)) = (form.pwd, form.email, form.tokenid, form.tokenval) {
-      if !tokens.validate(&tokenid, &captcha_code).await? {
+    if let (Some(pwd), Some(email), Some(tokenid), Some(captcha_code)) =
+      (form.pwd, form.email, form.tokenid, form.tokenval)
+    {
+      if !(8..=15).contains(&pwd.len())
+        || !pwd.bytes().all(|b| (33..=126).contains(&b))
+        || email.len() > 254
+        || !email.contains('@')
+        || email.chars().any(char::is_control)
+        || tokenid.len() != 32
+        || captcha_code.len() != 4
+      {
+        return Ok("reg_failed".into());
+      }
+      if !tokens
+        .validate(&tokenid, &captcha_code.to_ascii_uppercase())
+        .await?
+      {
         tracing::error!("invalid captcha");
-        return Ok("reg_failed".to_string())
+        return Ok("reg_failed".to_string());
       }
 
       let name = email.split('@').next().unwrap_or("user");
-      let user = users.create(name, &email, &pwd).await?;
+      let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(app_state.db_pool())
+        .await?;
+      if count >= 1000 || users.find_by_email(&email).await?.is_some() {
+        return Ok("reg_failed".into());
+      }
+      let user = users.create(name, &email, &pwd, app_state.vault()).await?;
 
-      tracing::info!(uin = user.uin, email = %email, "User registered");
-      return Ok(format!("reg_success:{}", user.uin))
+      tracing::info!(uin = user.uin, "User registered");
+      return Ok(format!("reg_success:{}", user.uin));
     }
   }
 
@@ -70,6 +89,5 @@ pub async fn register(
 }
 
 pub fn router() -> Router<SharedAppState> {
-  Router::new()
-    .route("/appsvc/fmregister3.asp", post(register))
+  Router::new().route("/appsvc/fmregister3.asp", post(register))
 }

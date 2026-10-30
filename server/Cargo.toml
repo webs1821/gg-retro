@@ -1,6 +1,6 @@
 [package]
 name = "gg-server"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Serwer protokolu Gadu-Gadu 6.0"
 license = "MIS"
@@ -41,13 +41,17 @@ thiserror = "2.0.17"
 serde = { version = "1.0.228", features = ["derive"] }
 tower-http = { version = "0.6", features = ["trace"] }
 local-ip-address = "0.6.8"
-sqlx = { version = "0.8.6", features = [ "runtime-tokio", "sqlite", "migrate" ] }
+sqlx = { version = "0.8.6", default-features = false, features = [ "runtime-tokio", "sqlite", "migrate", "macros" ] }
 parking_lot = "0.12.5"
 tokio-stream = {  version = "0.1.17", features = ["full"] }
 image = { version = "0.25", default-features = false, features = ["gif"] }
-imageproc = "0.25"
+imageproc = { version = "0.25", default-features = false }
 ab_glyph = "0.2"
 figment = { version = "0.10.19", features = ["toml", "env"] }
 askama = "0.14.0"
 rust-embed = "8.9"
 axum-embed = "0.1"
+chacha20poly1305 = "0.11.0"
+base64 = "0.22"
+zeroize = "1.8"
+subtle = "2.6"

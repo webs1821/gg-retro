@@ -1,11 +1,11 @@
 //! Offline message model and repository.
 
-use sqlx::{Pool, Sqlite, FromRow};
-use tracing::{info, instrument};
+use crate::models::RepositoryError;
 use gg_protocol::GGNumber;
 use gg_protocol::consts::GGMessageClass;
 use gg_protocol::packets::{GGRecvMessage, RichTextFormats};
-use crate::models::RepositoryError;
+use sqlx::{FromRow, Pool, Sqlite};
+use tracing::instrument;
 
 pub type QueuedMessageId = i64;
 
@@ -37,7 +37,8 @@ pub struct QueuedMessage {
 impl Into<GGRecvMessage> for QueuedMessage {
   fn into(self) -> GGRecvMessage {
     // Deserialize formatting from raw bytes using TryFrom
-    let formatting = self.formatting
+    let formatting = self
+      .formatting
       .as_deref()
       .and_then(|data| RichTextFormats::try_from(data).ok())
       .map(|f| f.0)
@@ -47,7 +48,7 @@ impl Into<GGRecvMessage> for QueuedMessage {
       sender: self.sender_uin,
       seq: self.seq,
       time: self.time,
-      class: GGMessageClass::Queued,
+      class: GGMessageClass::try_from(self.class).unwrap_or_default(),
       message: self.message,
       formatting,
     }
@@ -80,26 +81,29 @@ impl MessageRepository {
     msg: &GGRecvMessage,
   ) -> Result<QueuedMessage, RepositoryError> {
     // Serialize formatting to raw protocol bytes using Into
-    let formatting_bytes: Option<Vec<u8>> = msg.formatting
+    let formatting_bytes: Option<Vec<u8>> = msg
+      .formatting
       .as_ref()
       .filter(|f| !f.is_empty())
       .map(|f| Vec::<u8>::from(RichTextFormats::from(f.as_slice())));
 
     let result = sqlx::query_as::<_, QueuedMessage>(
       "INSERT INTO messages (recipient_uin, sender_uin, seq, time, class, message, formatting) \
-       VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *"
+       SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT count(*) FROM messages WHERE recipient_uin = ? AND delivered_at IS NULL) < 1000 AND (SELECT count(*) FROM messages) < 50000 RETURNING *"
     )
       .bind(recipient)
       .bind(msg.sender)
       .bind(msg.seq)
       .bind(msg.time)
-      .bind(msg.class as u32)
+      .bind(msg.class.bits())
       .bind(&msg.message)
       .bind(&formatting_bytes)
-      .fetch_one(&self.pool)
-      .await?;
+      .bind(recipient)
+      .fetch_optional(&self.pool)
+      .await?
+      .ok_or(RepositoryError::MailboxFull)?;
 
-    info!(
+    tracing::debug!(
       id = result.id,
       recipient = recipient,
       sender = msg.sender,
@@ -118,14 +122,18 @@ impl MessageRepository {
     let messages = sqlx::query_as::<_, QueuedMessage>(
       "SELECT * FROM messages \
        WHERE recipient_uin = ? AND delivered_at IS NULL \
-       ORDER BY time ASC \
-       LIMIT 100"
+       ORDER BY id ASC \
+       LIMIT 100",
     )
-      .bind(recipient)
-      .fetch_all(&self.pool)
-      .await?;
+    .bind(recipient)
+    .fetch_all(&self.pool)
+    .await?;
 
-    info!(count = messages.len(), recipient = recipient, "Found pending messages");
+    tracing::debug!(
+      count = messages.len(),
+      recipient = recipient,
+      "Found pending messages"
+    );
 
     if messages.len() > 0 {
       Ok(Some(messages))
@@ -143,12 +151,12 @@ impl MessageRepository {
     let message = sqlx::query_as::<_, QueuedMessage>(
       "SELECT * FROM messages \
        WHERE id = ? AND delivered_at IS NULL \
-       ORDER BY time ASC \
-       LIMIT 1"
+       ORDER BY id ASC \
+       LIMIT 1",
     )
-      .bind(msg_id)
-      .fetch_optional(&self.pool)
-      .await?;
+    .bind(msg_id)
+    .fetch_optional(&self.pool)
+    .await?;
 
     Ok(message)
   }
@@ -160,10 +168,7 @@ impl MessageRepository {
       return Ok(());
     }
 
-    let placeholders = ids.iter()
-      .map(|_| "?")
-      .collect::<Vec<_>>()
-      .join(",");
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
     let query = format!(
       "UPDATE messages SET delivered_at = CURRENT_TIMESTAMP \
@@ -178,7 +183,7 @@ impl MessageRepository {
 
     let result = query_builder.execute(&self.pool).await?;
 
-    info!(
+    tracing::debug!(
       count = result.rows_affected(),
       "Messages marked as delivered"
     );
@@ -187,19 +192,16 @@ impl MessageRepository {
 
   /// Mark a single message as delivered by ID.
   #[instrument(skip(self))]
-  pub async fn mark_single_delivered(
-    &self,
-    id: QueuedMessageId,
-  ) -> Result<(), RepositoryError> {
+  pub async fn mark_single_delivered(&self, id: QueuedMessageId) -> Result<(), RepositoryError> {
     let result = sqlx::query(
       "UPDATE messages SET delivered_at = CURRENT_TIMESTAMP \
-       WHERE id = ? AND delivered_at IS NULL"
+       WHERE id = ? AND delivered_at IS NULL",
     )
-      .bind(id)
-      .execute(&self.pool)
-      .await?;
+    .bind(id)
+    .execute(&self.pool)
+    .await?;
 
-    info!(
+    tracing::debug!(
       id = id,
       rows_affected = result.rows_affected(),
       "Message marked as delivered"
@@ -211,22 +213,19 @@ impl MessageRepository {
   /// Delete messages that were delivered more than `minutes` ago.
   /// Returns the number of deleted messages.
   #[instrument(skip(self))]
-  pub async fn cleanup_old_delivered(
-    &self,
-    minutes: i64,
-  ) -> Result<u64, RepositoryError> {
+  pub async fn cleanup_old_delivered(&self, minutes: i64) -> Result<u64, RepositoryError> {
     let result = sqlx::query(
       "DELETE FROM messages \
        WHERE delivered_at IS NOT NULL \
-       AND datetime(delivered_at, '+' || ? || ' minutes') < datetime('now')"
+       AND datetime(delivered_at, '+' || ? || ' minutes') < datetime('now')",
     )
-      .bind(minutes)
-      .execute(&self.pool)
-      .await?;
+    .bind(minutes)
+    .execute(&self.pool)
+    .await?;
 
     let deleted = result.rows_affected();
     if deleted > 0 {
-      info!(count = deleted, "Old delivered messages cleaned up");
+      tracing::debug!(count = deleted, "Old delivered messages cleaned up");
     }
     Ok(deleted)
   }
@@ -238,11 +237,12 @@ mod tests {
   use sqlx::sqlite::SqlitePoolOptions;
 
   async fn setup_test_db() -> Result<Pool<Sqlite>, RepositoryError> {
-    let pool = SqlitePoolOptions::new()
-      .connect("sqlite::memory:")
-      .await?;
+    let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await?;
 
-    sqlx::migrate!("./migrations").run(&pool).await.expect("migrations failed");
+    sqlx::migrate!("./migrations")
+      .run(&pool)
+      .await
+      .expect("migrations failed");
 
     Ok(pool)
   }
@@ -299,7 +299,7 @@ mod tests {
 
     let recv_msg: GGRecvMessage = stored.into();
     assert_eq!(recv_msg.sender, 12345);
-    assert_eq!(recv_msg.class, GGMessageClass::Queued);
+    assert_eq!(recv_msg.class, GGMessageClass::Chat);
     assert_eq!(recv_msg.message, "Queued message");
   }
 

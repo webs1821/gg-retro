@@ -3,6 +3,7 @@
 
 // All known hostnames that need to be replaced
 const HOSTNAMES = [
+  'appsrv.gadu-gadu.pl',
   'appmsg.gadu-gadu.pl',    // 19 chars - hub server
   'register.gadu-gadu.pl',  // 21 chars - registration (LONGEST)
   'adserver.gadu-gadu.pl',  // 21 chars - ads
@@ -13,7 +14,7 @@ const HOSTNAMES = [
   'smsat.gadu-gadu.pl',     // 18 chars - SMS
 ];
 
-const MAX_DOMAIN_LENGTH = Math.max(...HOSTNAMES.map(h => h.length)); // 21 chars
+const MAX_DOMAIN_LENGTH = Math.min(...HOSTNAMES.map(h => h.length)); // 21 chars
 
 // Convert string to UTF-16LE bytes
 function toUtf16Le(str) {
@@ -54,12 +55,25 @@ function findAll(data, pattern) {
 // Replace all occurrences (null-padded to maintain size)
 function replaceAll(data, pattern, replacement) {
   const positions = findAll(data, pattern);
+  if (replacement.length > pattern.length) throw new Error("Replacement exceeds original hostname length");
   const padded = new Uint8Array(pattern.length);
   padded.set(replacement);
 
   for (const pos of positions) {
-    for (let i = 0; i < padded.length; i++) {
-      data[pos + i] = padded[i];
+    const width = pattern[1] === 0 ? 2 : 1;
+    const suffixStart = pos + pattern.length;
+    const next = data[suffixStart];
+    if (replacement.length < pattern.length && (next === 47 || next === 58 || next === 63)) {
+      // A hostname can be embedded in a complete URL. Shift its suffix before
+      // padding; inserting NULs immediately after the domain truncates the URL.
+      let end = suffixStart;
+      while (end + width <= data.length && (data[end] !== 0 || (width === 2 && data[end + 1] !== 0))) end += width;
+      const suffix = data.slice(suffixStart, end);
+      data.set(replacement, pos);
+      data.set(suffix, pos + replacement.length);
+      data.fill(0, pos + replacement.length + suffix.length, end);
+    } else {
+      data.set(padded, pos);
     }
   }
   return positions.length;
@@ -67,6 +81,7 @@ function replaceAll(data, pattern, replacement) {
 
 // Patch binary data with new domain
 function patchBinary(data, newDomain) {
+  if (newDomain.length > MAX_DOMAIN_LENGTH || !/^[a-zA-Z0-9]+(?:[.-][a-zA-Z0-9]+)*$/.test(newDomain)) throw new Error(`Nieprawidłowa domena (maksymalnie ${MAX_DOMAIN_LENGTH} znaków ASCII).`);
   const results = { ascii: 0, utf16: 0 };
   const newDomainAscii = toAscii(newDomain);
   const newDomainUtf16 = toUtf16Le(newDomain);
@@ -103,7 +118,7 @@ function patchFile(event) {
     return false;
   }
 
-  if (newDomain.length > MAX_DOMAIN_LENGTH) {
+  if (newDomain.length > MAX_DOMAIN_LENGTH || !/^[a-zA-Z0-9]+(?:[.-][a-zA-Z0-9]+)*$/.test(newDomain)) {
     statusDiv.innerHTML = '<div class="info-box" style="background: #FFE0E0;">Adres serwera max ' + MAX_DOMAIN_LENGTH + ' znakow! (masz: ' + newDomain.length + ')</div>';
     return false;
   }
@@ -132,15 +147,13 @@ function patchFile(event) {
     const url = URL.createObjectURL(blob);
     const outputName = file.name.replace(/\.exe$/i, '') + '_patched.exe';
 
-    statusDiv.innerHTML = `
-      <div class="info-box" style="background: #E0FFE0;">
-        Plik spatchowany!<br><br>
-        <strong>Zamieniono:</strong><br>
-        - Wszystkie domeny *.gadu-gadu.pl -> ${newDomain}<br>
-        - ASCII: ${results.ascii}x, UTF-16: ${results.utf16}x<br><br>
-        <a href="${url}" download="${outputName}" class="button">Pobierz ${outputName}</a>
-      </div>
-    `;
+    statusDiv.replaceChildren();
+    const info = document.createElement('div'); info.className = 'info-box';
+    info.textContent = `Zmieniono ${results.ascii} adresów ASCII i ${results.utf16} UTF-16 na ${newDomain}. `;
+    const link = document.createElement('a'); link.href = url; link.download = outputName;
+    link.className = 'button'; link.textContent = `Pobierz ${outputName}`;
+    info.append(link); statusDiv.append(info);
+
   };
 
   reader.onerror = function() {

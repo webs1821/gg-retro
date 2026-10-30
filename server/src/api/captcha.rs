@@ -5,13 +5,18 @@
 //!
 //! All account operations (register, delete, change password) require a valid token.
 
-use axum::{Router, routing::get, extract::{Query, State}, http::{StatusCode, header}};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
-use serde::Deserialize;
+use axum::{
+  Router,
+  extract::{Query, State},
+  http::{StatusCode, header},
+  routing::get,
+};
+
+use ab_glyph::{FontRef, PxScale};
 use image::{ImageBuffer, Rgba, codecs::gif::GifEncoder};
 use imageproc::drawing::draw_text_mut;
-use ab_glyph::{FontRef, PxScale};
+use serde::Deserialize;
 
 use crate::core::SharedAppState;
 use crate::models::{RepositoryError, TokenRepository};
@@ -43,7 +48,9 @@ fn render_captcha_gif(text: &str) -> Vec<u8> {
   let mut buf = Vec::new();
   {
     let mut encoder = GifEncoder::new(&mut buf);
-    encoder.encode_frame(image::Frame::new(img)).expect("failed to encode gif");
+    encoder
+      .encode_frame(image::Frame::new(img))
+      .expect("failed to encode gif");
   }
   buf
 }
@@ -63,20 +70,29 @@ fn render_captcha_gif(text: &str) -> Vec<u8> {
 /// abc123def456
 /// http://192.168.1.100:80/appsvc/tokenpic.asp
 /// ```
-#[tracing::instrument(skip(app_state))]
+#[tracing::instrument(skip_all)]
 pub async fn regtoken(State(app_state): State<SharedAppState>) -> Result<String, RepositoryError> {
   let repo = TokenRepository::new(app_state.db_pool());
   let token = repo.create().await?;
 
-  let endpoint = app_state.host_uri("/appsvc/tokenpic.asp").unwrap_or_default().to_string();
-  Ok(format!("{} {} 4\r\n{}\r\n{}", WIDTH, HEIGHT, token.token_id, endpoint))
+  let endpoint = app_state
+    .host_uri("/appsvc/tokenpic.asp")
+    .unwrap_or_default()
+    .to_string();
+  Ok(format!(
+    "{} {} 4\r\n{}\r\n{}",
+    WIDTH, HEIGHT, token.token_id, endpoint
+  ))
 }
 
 /// Get captcha image for the given token.
 ///
 /// Returns a GIF image with the captcha text.
-#[tracing::instrument(skip(app_state))]
-pub async fn tokenpic(State(app_state): State<SharedAppState>, Query(params): Query<TokenPicParams>) -> Response {
+#[tracing::instrument(skip_all)]
+pub async fn tokenpic(
+  State(app_state): State<SharedAppState>,
+  Query(params): Query<TokenPicParams>,
+) -> Response {
   let repo = TokenRepository::new(app_state.db_pool());
 
   let token = match repo.find_by_token_id(&params.tokenid).await {
@@ -85,18 +101,18 @@ pub async fn tokenpic(State(app_state): State<SharedAppState>, Query(params): Qu
     Err(e) => return e.into_response(),
   };
 
-  tracing::info!(token = ?token, "rendering captcha");
   let gif_data = render_captcha_gif(&token.captcha_code);
 
   (
     StatusCode::OK,
     [(header::CONTENT_TYPE, "image/gif")],
-    gif_data
-  ).into_response()
+    gif_data,
+  )
+    .into_response()
 }
 
 pub fn router() -> Router<SharedAppState> {
   Router::new()
-    .route("/appsvc/regtoken.asp", any(regtoken))
+    .route("/appsvc/regtoken.asp", get(regtoken))
     .route("/appsvc/tokenpic.asp", get(tokenpic))
 }
