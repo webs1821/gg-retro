@@ -1,6 +1,6 @@
-use super::images::{Begin, ImageEvent};
+use super::images::{Begin, ImageEvent, ImagePayload};
 use super::{MessagesStream, PresenceChangeStream, UserPresence, contact_book::ContactBook};
-use crate::models::images::{self, OfferedImage};
+use crate::models::images;
 use crate::{
   core::SharedAppState,
   models::{MessageRepository, UserRepository},
@@ -36,7 +36,6 @@ pub struct UserSessionController {
   contacts_ready: bool,
   image_events: Option<tokio_stream::wrappers::ReceiverStream<ImageEvent>>,
   image_size: u8,
-  last_image_prefetch: Option<Instant>,
 }
 #[derive(Error, Debug)]
 pub enum UserSessionError {
@@ -73,7 +72,6 @@ impl UserSessionController {
       contacts_ready: false,
       image_events: None,
       image_size: 0,
-      last_image_prefetch: None,
     }
   }
   async fn send(&mut self, packet: GGPacket) -> Result<(), UserSessionError> {
@@ -251,7 +249,6 @@ impl UserSessionController {
               if last_packet.elapsed() > Duration::from_secs(300) { return Err(UserSessionError::Timeout); }
               self.deliver_pending().await?;
               for (target,event) in self.app_state.images.expire() { self.app_state.message_dispatcher().image_event(target,event); }
-              self.prefetch_images().await?;
           }
           Some(()) = self.messages.as_mut().unwrap().next() => self.deliver_pending().await?,
           Some(event) = self.image_events.as_mut().unwrap().next(), if self.contacts_ready => self.image_event(event).await?,
@@ -278,12 +275,8 @@ impl UserSessionController {
                       message_count += 1;
                       if message_count > 300 { return Err(UserSessionError::Limit); }
                       let recipient = message.recipient; let seq = message.seq;
-                      let image_ids=images::descriptors(message.formatting.as_deref());
                       let status = self.app_state.message_dispatcher().dispatch(uin, message).await?;
                       self.send(GGPacket::SendMessageAck(GGSendMessageAck { recipient, seq, status })).await?;
-                      if status == AckStatus::Queued {
-                          for id in image_ids {self.start_image_fetch(uin,recipient,id,None).await?;}
-                      }
                   }
                   GGPacket::ListEmpty => {
                       contacts.clear(); self.contacts.set(&[]);
@@ -342,26 +335,12 @@ impl UserSessionController {
     owner: u32,
     recipient: u32,
     id: ImageId,
-    waiter: Option<u64>,
+    waiter: u64,
   ) -> Result<bool, UserSessionError> {
-    if self.images_blocked(owner, recipient) {
+    if self.images_blocked(owner, recipient)
+      || !images::offered(self.app_state.db_pool(), owner, recipient, id).await?
+    {
       return Ok(false);
-    }
-    match images::lookup(self.app_state.db_pool(), owner, recipient, id).await? {
-      OfferedImage::Ready(_) => {
-        return Ok(waiter.is_none_or(|request_session| {
-          self.app_state.message_dispatcher().image_event(
-            recipient,
-            ImageEvent::Ready {
-              owner,
-              id,
-              request_session,
-            },
-          )
-        }));
-      }
-      OfferedImage::Missing => return Ok(false),
-      OfferedImage::Pending => {}
     }
     let Some(owner_session) = self.app_state.message_dispatcher().session_id(owner) else {
       return Ok(false);
@@ -374,14 +353,6 @@ impl UserSessionController {
       Begin::Existing => Ok(true),
       Begin::Full => Ok(false),
       Begin::New => {
-        if let Err(error) = images::attempted(self.app_state.db_pool(), owner, recipient, id).await
-        {
-          self
-            .app_state
-            .images
-            .cancel(owner, recipient, id, owner_session);
-          return Err(error.into());
-        }
         if self.app_state.message_dispatcher().image_event(
           owner,
           ImageEvent::Request {
@@ -400,21 +371,6 @@ impl UserSessionController {
         }
       }
     }
-  }
-  async fn prefetch_images(&mut self) -> Result<(), UserSessionError> {
-    if !self.contacts_ready
-      || self
-        .last_image_prefetch
-        .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
-    {
-      return Ok(());
-    }
-    self.last_image_prefetch = Some(Instant::now());
-    let owner = self.uin.ok_or(UserSessionError::Authentication)?;
-    for (recipient, id) in images::pending(self.app_state.db_pool(), owner).await? {
-      self.start_image_fetch(owner, recipient, id, None).await?;
-    }
-    Ok(())
   }
   async fn send_image(
     &mut self,
@@ -477,63 +433,41 @@ impl UserSessionController {
       return Ok(());
     }
     if matches!(message.transfer, ImageTransfer::Request(_)) {
-      let offered = if id.size <= u32::from(self.image_size) * 1024 {
-        images::lookup(self.app_state.db_pool(), message.recipient, uin, id).await?
-      } else {
-        OfferedImage::Missing
-      };
-      match offered {
-        OfferedImage::Missing => {
-          self.image_ack(&message, AckStatus::NotDelivered).await?;
-          self
-            .send_image(message.recipient, ImageTransfer::unavailable(id))
-            .await?;
-        }
-        OfferedImage::Ready(image) => {
-          self.image_ack(&message, AckStatus::Delivered).await?;
-          self.send_cached_image(message.recipient, id, image).await?;
-        }
-        OfferedImage::Pending => {
-          let accepted = self
-            .start_image_fetch(message.recipient, uin, id, Some(session))
-            .await?;
-          self
-            .image_ack(
-              &message,
-              if accepted {
-                AckStatus::Delivered
-              } else {
-                AckStatus::NotDelivered
-              },
-            )
-            .await?;
-          if !accepted {
-            self
-              .send_image(message.recipient, ImageTransfer::unavailable(id))
-              .await?;
-          }
-        }
+      let accepted = id.size <= u32::from(self.image_size) * 1024
+        && self
+          .start_image_fetch(message.recipient, uin, id, session)
+          .await?;
+      self
+        .image_ack(
+          &message,
+          if accepted {
+            AckStatus::Delivered
+          } else {
+            AckStatus::NotDelivered
+          },
+        )
+        .await?;
+      if !accepted {
+        self
+          .send_image(message.recipient, ImageTransfer::unavailable(id))
+          .await?;
       }
     } else {
-      let (status, notification) = self
-        .app_state
-        .images
-        .receive(uin, message.recipient, session, message.transfer.clone())
-        .await?;
-      if let Some((recipient, event)) = notification {
+      let (status, notification) =
         self
           .app_state
+          .images
+          .receive(uin, message.recipient, session, message.transfer.clone());
+      if let Some((recipient, event)) = notification {
+        if !self
+          .app_state
           .message_dispatcher()
-          .image_event(recipient, event);
+          .image_event(recipient, event)
+        {
+          self.app_state.images.cancel(uin, recipient, id, session);
+        }
       }
       self.image_ack(&message, status).await?;
-      if !self
-        .app_state
-        .images
-        .expecting(uin, message.recipient, id, session)
-      {
-        self.last_image_prefetch = None;
-      }
     }
     Ok(())
   }
@@ -574,16 +508,19 @@ impl UserSessionController {
         request_session,
       } => {
         let recipient = self.uin.ok_or(UserSessionError::Authentication)?;
-        if self.registration == Some(request_session) && !self.images_blocked(owner, recipient) {
-          match images::lookup(self.app_state.db_pool(), owner, recipient, id).await? {
-            OfferedImage::Ready(image) => self.send_cached_image(owner, id, image).await?,
-            _ => {
-              self
-                .send_image(owner, ImageTransfer::unavailable(id))
-                .await?
+        if self.registration == Some(request_session) {
+          let payload = self
+            .app_state
+            .images
+            .take(owner, recipient, id, request_session);
+          if !self.images_blocked(owner, recipient)
+            && images::offered(self.app_state.db_pool(), owner, recipient, id).await?
+          {
+            if let Some(payload) = payload {
+              self.send_image_payload(owner, id, payload).await?;
+              return Ok(());
             }
           }
-        } else if self.registration == Some(request_session) {
           self
             .send_image(owner, ImageTransfer::unavailable(id))
             .await?;
@@ -603,11 +540,11 @@ impl UserSessionController {
     }
     Ok(())
   }
-  async fn send_cached_image(
+  async fn send_image_payload(
     &mut self,
     owner: u32,
     id: ImageId,
-    image: images::CachedImage,
+    image: ImagePayload,
   ) -> Result<(), UserSessionError> {
     if id.size > u32::from(self.image_size) * 1024
       || image.data.len() != id.size as usize

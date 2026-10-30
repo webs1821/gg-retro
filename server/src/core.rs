@@ -152,7 +152,7 @@ pub async fn create_app_state() -> Result<SharedAppState, Box<dyn std::error::Er
   };
   let message_dispatcher = MessageDispatcher::new(&db_pool);
   Ok(Arc::new(AppState {
-    images: crate::messenger::images::ImageService::new(&db_pool),
+    images: crate::messenger::images::ImageService::new(),
     db_pool,
     client_downloads,
     host_ip,

@@ -1,5 +1,4 @@
-//! Bounded, session-bound image assembly. Only verified complete images reach SQLite/receivers.
-use crate::models::{DatabasePool, RepositoryError, images};
+//! Bounded, session-bound relay. Image bytes exist only for a requested live transfer.
 use gg_protocol::{
   consts::AckStatus,
   packets::{ImageId, ImageTransfer},
@@ -30,13 +29,17 @@ pub enum ImageEvent {
 }
 type Key = (u32, u32, ImageId);
 pub type ImageNotification = (u32, ImageEvent);
+pub struct ImagePayload {
+  pub filename: Vec<u8>,
+  pub data: Vec<u8>,
+}
 struct Upload {
   session: u64,
-  waiter: Option<u64>,
+  waiter: u64,
   started: Instant,
   filename: Option<Vec<u8>>,
   data: Vec<u8>,
-  completing: bool,
+  ready: bool,
 }
 #[derive(PartialEq, Eq)]
 pub enum Begin {
@@ -46,13 +49,11 @@ pub enum Begin {
 }
 pub struct ImageService {
   uploads: Mutex<HashMap<Key, Upload>>,
-  pool: DatabasePool,
 }
 impl ImageService {
-  pub fn new(pool: &DatabasePool) -> Self {
+  pub fn new() -> Self {
     Self {
       uploads: Mutex::new(HashMap::new()),
-      pool: pool.clone(),
     }
   }
   pub fn begin(
@@ -61,15 +62,12 @@ impl ImageService {
     recipient: u32,
     id: ImageId,
     owner_session: u64,
-    waiter: Option<u64>,
+    waiter: u64,
   ) -> Begin {
     let mut uploads = self.uploads.lock();
     let key = (owner, recipient, id);
-    if let Some(upload) = uploads.get_mut(&key) {
-      if upload.session == owner_session {
-        if waiter.is_some() {
-          upload.waiter = waiter;
-        }
+    if let Some(upload) = uploads.get(&key) {
+      if upload.session == owner_session && upload.waiter == waiter {
         return Begin::Existing;
       }
       uploads.remove(&key);
@@ -88,30 +86,20 @@ impl ImageService {
         started: Instant::now(),
         filename: None,
         data: vec![],
-        completing: false,
+        ready: false,
       },
     );
     Begin::New
   }
-  fn notification(key: Key, upload: Upload, ready: bool) -> Option<ImageNotification> {
-    upload.waiter.map(|request_session| {
-      (
-        key.1,
-        if ready {
-          ImageEvent::Ready {
-            owner: key.0,
-            id: key.2,
-            request_session,
-          }
-        } else {
-          ImageEvent::Unavailable {
-            owner: key.0,
-            id: key.2,
-            request_session,
-          }
-        },
-      )
-    })
+  fn unavailable(key: Key, upload: Upload) -> ImageNotification {
+    (
+      key.1,
+      ImageEvent::Unavailable {
+        owner: key.0,
+        id: key.2,
+        request_session: upload.waiter,
+      },
+    )
   }
   pub fn cancel(
     &self,
@@ -125,52 +113,78 @@ impl ImageService {
     if !uploads.get(&key).is_some_and(|u| u.session == session) {
       return None;
     }
-    Self::notification(key, uploads.remove(&key).unwrap(), false)
+    Some(Self::unavailable(key, uploads.remove(&key).unwrap()))
   }
   pub fn expecting(&self, owner: u32, recipient: u32, id: ImageId, session: u64) -> bool {
     self
       .uploads
       .lock()
       .get(&(owner, recipient, id))
-      .is_some_and(|u| u.session == session && !u.completing)
+      .is_some_and(|u| u.session == session && !u.ready)
   }
   pub fn expire(&self) -> Vec<ImageNotification> {
     let mut uploads = self.uploads.lock();
     let keys: Vec<_> = uploads
       .iter()
-      .filter(|(_, u)| u.started.elapsed() >= Duration::from_secs(60) && !u.completing)
-      .map(|(k, _)| *k)
+      .filter(|(_, u)| u.started.elapsed() >= Duration::from_secs(60))
+      .map(|(key, _)| *key)
       .collect();
     keys
       .into_iter()
-      .filter_map(|key| Self::notification(key, uploads.remove(&key).unwrap(), false))
+      .map(|key| Self::unavailable(key, uploads.remove(&key).unwrap()))
       .collect()
   }
   pub fn disconnect(&self, uin: u32, session: u64) -> Vec<ImageNotification> {
     let mut uploads = self.uploads.lock();
     let keys: Vec<_> = uploads
       .iter()
-      .filter(|(k, u)| k.0 == uin && u.session == session)
-      .map(|(k, _)| *k)
+      .filter(|(k, u)| (k.0 == uin && u.session == session) || (k.1 == uin && u.waiter == session))
+      .map(|(key, _)| *key)
       .collect();
-    let notifications = keys
+    keys
       .into_iter()
-      .filter_map(|key| Self::notification(key, uploads.remove(&key).unwrap(), false))
-      .collect();
-    for (key, upload) in uploads.iter_mut() {
-      if key.1 == uin && upload.waiter == Some(session) {
-        upload.waiter = None;
-      }
-    }
-    notifications
+      .filter_map(|key| {
+        let upload = uploads.remove(&key).unwrap();
+        if key.1 == uin && upload.waiter == session {
+          None
+        } else {
+          Some(Self::unavailable(key, upload))
+        }
+      })
+      .collect()
   }
-  pub async fn receive(
+  /// Take once, only for the requesting session. Ready payloads share the bounded transfer budget.
+  pub fn take(
+    &self,
+    owner: u32,
+    recipient: u32,
+    id: ImageId,
+    request_session: u64,
+  ) -> Option<ImagePayload> {
+    let mut uploads = self.uploads.lock();
+    let key = (owner, recipient, id);
+    if !uploads
+      .get(&key)
+      .is_some_and(|u| u.waiter == request_session && u.ready)
+    {
+      return None;
+    }
+    let upload = uploads.remove(&key).unwrap();
+    if upload.started.elapsed() >= Duration::from_secs(60) {
+      return None;
+    }
+    Some(ImagePayload {
+      filename: upload.filename.unwrap(),
+      data: upload.data,
+    })
+  }
+  pub fn receive(
     &self,
     owner: u32,
     recipient: u32,
     session: u64,
     transfer: ImageTransfer,
-  ) -> Result<(AckStatus, Option<ImageNotification>), RepositoryError> {
+  ) -> (AckStatus, Option<ImageNotification>) {
     let ImageTransfer::Reply {
       id,
       first,
@@ -178,67 +192,52 @@ impl ImageService {
       data,
     } = transfer
     else {
-      return Ok((AckStatus::NotDelivered, None));
+      return (AckStatus::NotDelivered, None);
     };
     let key = (owner, recipient, id);
-    let complete = {
-      let mut uploads = self.uploads.lock();
-      let Some(upload) = uploads.get_mut(&key) else {
-        return Ok((AckStatus::NotDelivered, None));
-      };
-      if upload.session != session || upload.completing {
-        return Ok((AckStatus::NotDelivered, None));
-      }
-      let invalid = upload.started.elapsed() >= Duration::from_secs(60)
-        || (first && (filename.is_none() || upload.filename.is_some()))
-        || (!first && upload.filename.is_none())
-        || upload.data.len() + data.len() > id.size as usize;
-      if invalid {
-        return Ok((
-          AckStatus::NotDelivered,
-          Self::notification(key, uploads.remove(&key).unwrap(), false),
-        ));
-      }
-      if first {
-        upload.filename = filename.map(|name| safe_filename(&name));
-      }
-      upload.data.extend_from_slice(&data);
-      if upload.data.len() < id.size as usize {
-        return Ok((AckStatus::Delivered, None));
-      }
-      if crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC).checksum(&upload.data) != id.crc32 {
-        return Ok((
-          AckStatus::NotDelivered,
-          Self::notification(key, uploads.remove(&key).unwrap(), false),
-        ));
-      }
-      upload.completing = true;
-      (
-        upload.filename.clone().unwrap(),
-        std::mem::take(&mut upload.data),
-      )
+    let mut uploads = self.uploads.lock();
+    let Some(upload) = uploads.get_mut(&key) else {
+      return (AckStatus::NotDelivered, None);
     };
-    // On a database error keep the waiter until the session's cleanup cancels this upload.
-    let saved = images::store(&self.pool, owner, recipient, id, &complete.0, &complete.1).await?;
-    let notification = {
-      let mut uploads = self.uploads.lock();
-      if uploads
-        .get(&key)
-        .is_some_and(|u| u.session == session && u.completing)
-      {
-        Self::notification(key, uploads.remove(&key).unwrap(), saved)
-      } else {
-        None
-      }
-    };
-    Ok((
-      if saved {
-        AckStatus::Delivered
-      } else {
-        AckStatus::NotDelivered
-      },
-      notification,
-    ))
+    if upload.session != session || upload.ready {
+      return (AckStatus::NotDelivered, None);
+    }
+    let invalid = upload.started.elapsed() >= Duration::from_secs(60)
+      || (first && (filename.is_none() || upload.filename.is_some()))
+      || (!first && upload.filename.is_none())
+      || upload.data.len() + data.len() > id.size as usize;
+    if invalid {
+      return (
+        AckStatus::NotDelivered,
+        Some(Self::unavailable(key, uploads.remove(&key).unwrap())),
+      );
+    }
+    if first {
+      upload.filename = filename.map(|name| safe_filename(&name));
+      upload.data = Vec::with_capacity(id.size as usize);
+    }
+    upload.data.extend_from_slice(&data);
+    if upload.data.len() < id.size as usize {
+      return (AckStatus::Delivered, None);
+    }
+    if crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC).checksum(&upload.data) != id.crc32 {
+      return (
+        AckStatus::NotDelivered,
+        Some(Self::unavailable(key, uploads.remove(&key).unwrap())),
+      );
+    }
+    upload.ready = true;
+    (
+      AckStatus::Delivered,
+      Some((
+        recipient,
+        ImageEvent::Ready {
+          owner,
+          id,
+          request_session: upload.waiter,
+        },
+      )),
+    )
   }
 }
 fn safe_filename(name: &[u8]) -> Vec<u8> {
@@ -274,89 +273,139 @@ fn safe_filename(name: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  fn service() -> ImageService {
-    ImageService::new(
-      &sqlx::sqlite::SqlitePoolOptions::new()
-        .connect_lazy("sqlite::memory:")
-        .unwrap(),
-    )
-  }
   fn id(n: u32) -> ImageId {
-    ImageId {
-      size: 100,
-      crc32: n,
-    }
+    ImageId { size: 9, crc32: n }
   }
-  #[tokio::test]
-  async fn transfer_limits_are_global_and_per_participant() {
-    let s = service();
-    for n in 0..4 {
-      assert!(s.begin(1, 2, id(n), 10, None) == Begin::New);
-    }
-    assert!(s.begin(1, 3, id(5), 10, None) == Begin::Full);
-    for n in 0..4 {
-      assert!(s.begin(3, 2, id(n), 30, None) == Begin::New);
-    }
-    assert!(s.begin(4, 2, id(9), 40, None) == Begin::Full);
-    for n in 0..56 {
-      assert!(s.begin(100 + n, 1000 + n, id(n), n as u64, None) == Begin::New);
-    }
-    assert!(s.begin(999, 999, id(1), 999, None) == Begin::Full);
-  }
-  #[tokio::test]
-  async fn partial_upload_expires_and_notifies_only_requesting_session() {
-    let s = service();
-    s.begin(1, 2, id(1), 10, None);
-    assert!(s.begin(1, 2, id(1), 10, Some(20)) == Begin::Existing);
-    s.uploads.lock().get_mut(&(1, 2, id(1))).unwrap().started =
-      Instant::now() - Duration::from_secs(61);
-    let events = s.expire();
-    assert_eq!(events.len(), 1);
+  fn complete(s: &ImageService) {
+    let (ack, event) = s.receive(
+      1,
+      2,
+      10,
+      ImageTransfer::Reply {
+        id: id(0xcbf43926),
+        first: true,
+        filename: Some(b"image.png".to_vec()),
+        data: b"123456789".to_vec(),
+      },
+    );
+    assert_eq!(ack, AckStatus::Delivered);
     assert!(matches!(
-      events[0],
-      (
+      event,
+      Some((
         2,
-        ImageEvent::Unavailable {
+        ImageEvent::Ready {
           request_session: 20,
           ..
         }
-      )
+      ))
     ));
+  }
+  #[test]
+  fn transfer_limits_are_global_and_per_participant() {
+    let s = ImageService::new();
+    for n in 0..4 {
+      assert!(s.begin(1, 2, id(n), 10, 20) == Begin::New);
+    }
+    assert!(s.begin(1, 3, id(5), 10, 30) == Begin::Full);
+    for n in 0..4 {
+      assert!(s.begin(3, 2, id(n), 30, 20) == Begin::New);
+    }
+    assert!(s.begin(4, 2, id(9), 40, 20) == Begin::Full);
+    for n in 0..56 {
+      assert!(s.begin(100 + n, 1000 + n, id(n), n as u64, 1000 + n as u64) == Begin::New);
+    }
+    assert!(s.begin(999, 999, id(1), 999, 999) == Begin::Full);
+  }
+  #[test]
+  fn completed_payload_is_private_single_use_and_not_a_cache() {
+    let s = ImageService::new();
+    let id = id(0xcbf43926);
+    s.begin(1, 2, id, 10, 20);
+    complete(&s);
+    assert!(s.take(1, 3, id, 20).is_none());
+    assert!(s.take(1, 2, id, 21).is_none());
+    assert_eq!(s.take(1, 2, id, 20).unwrap().data, b"123456789");
+    assert!(s.take(1, 2, id, 20).is_none());
     assert!(s.uploads.lock().is_empty());
   }
-  #[tokio::test]
-  async fn replaced_source_cannot_append_or_cancel_new_transfer() {
-    let s = service();
-    s.begin(1, 2, id(1), 10, Some(20));
-    s.begin(1, 2, id(1), 11, Some(21));
+  #[test]
+  fn ready_images_still_expire_and_hold_a_transfer_slot() {
+    let s = ImageService::new();
+    let id = id(0xcbf43926);
+    s.begin(1, 2, id, 10, 20);
+    complete(&s);
+    for n in 0..3 {
+      s.begin(1, 2, super::tests::id(n), 10, 20);
+    }
+    assert!(s.begin(1, 2, super::tests::id(4), 10, 20) == Begin::Full);
+    s.uploads.lock().get_mut(&(1, 2, id)).unwrap().started =
+      Instant::now() - Duration::from_secs(61);
+    assert_eq!(s.expire().len(), 1);
+    assert!(s.take(1, 2, id, 20).is_none());
+  }
+  #[test]
+  fn disconnect_discards_buffers_and_old_sessions_cannot_cancel_new_transfers() {
+    let s = ImageService::new();
+    let id = id(0xcbf43926);
+    s.begin(1, 2, id, 10, 20);
+    complete(&s);
+    assert_eq!(s.disconnect(1, 10).len(), 1);
+    assert!(s.take(1, 2, id, 20).is_none());
+    s.begin(1, 2, id, 10, 20);
+    complete(&s);
+    assert!(s.disconnect(2, 20).is_empty());
+    assert!(s.uploads.lock().is_empty());
+    s.begin(1, 2, id, 11, 21);
     assert!(s.disconnect(1, 10).is_empty());
-    let (ack, notification) = s
-      .receive(
+    assert!(s.disconnect(2, 20).is_empty());
+    assert!(s.expecting(1, 2, id, 11));
+    let (ack, _) = s.receive(
+      1,
+      2,
+      10,
+      ImageTransfer::Reply {
+        id,
+        first: true,
+        filename: Some(b"x.png".to_vec()),
+        data: vec![1],
+      },
+    );
+    assert_eq!(ack, AckStatus::NotDelivered);
+    assert!(s.uploads.lock()[&(1, 2, id)].data.is_empty());
+  }
+  #[test]
+  fn duplicate_start_and_cumulative_overflow_cancel_assembly() {
+    let s = ImageService::new();
+    let id = ImageId { size: 2, crc32: 1 };
+    for duplicate in [true, false] {
+      s.begin(1, 2, id, 10, 20);
+      let (ack, _) = s.receive(
         1,
         2,
         10,
         ImageTransfer::Reply {
-          id: id(1),
+          id,
           first: true,
-          filename: Some(b"image.gif".to_vec()),
+          filename: Some(b"image.png".to_vec()),
           data: vec![1],
         },
-      )
-      .await
-      .unwrap();
-    assert_eq!(ack, AckStatus::NotDelivered);
-    assert!(notification.is_none());
-    assert_eq!(s.uploads.lock()[&(1, 2, id(1))].session, 11);
-    assert!(s.uploads.lock()[&(1, 2, id(1))].data.is_empty());
-  }
-  #[tokio::test]
-  async fn receiver_relogin_drops_old_waiter_but_keeps_prefetch() {
-    let s = service();
-    s.begin(1, 2, id(1), 10, Some(20));
-    assert!(s.disconnect(2, 20).is_empty());
-    assert_eq!(s.uploads.lock()[&(1, 2, id(1))].waiter, None);
-    assert!(s.begin(1, 2, id(1), 10, Some(21)) == Begin::Existing);
-    assert_eq!(s.uploads.lock()[&(1, 2, id(1))].waiter, Some(21));
+      );
+      assert_eq!(ack, AckStatus::Delivered);
+      let (ack, event) = s.receive(
+        1,
+        2,
+        10,
+        ImageTransfer::Reply {
+          id,
+          first: duplicate,
+          filename: duplicate.then(|| b"image.png".to_vec()),
+          data: vec![2, 3],
+        },
+      );
+      assert_eq!(ack, AckStatus::NotDelivered);
+      assert!(event.is_some());
+      assert!(s.uploads.lock().is_empty());
+    }
   }
   #[test]
   fn unsafe_names_never_reach_a_windows_client() {
@@ -374,90 +423,5 @@ mod tests {
     }
     assert_eq!(safe_filename(b"C:\\private\\photo.png"), b"photo.png");
     assert_eq!(safe_filename(b"/home/private/photo.gif"), b"photo.gif");
-  }
-  #[tokio::test]
-  async fn failed_database_write_keeps_waiter_for_session_cleanup() {
-    let s = service(); // No schema: a valid complete upload will fail at the database write.
-    let id = ImageId {
-      size: 9,
-      crc32: 0xcbf43926,
-    }; // Standard IEEE CRC32 check vector.
-    s.begin(1, 2, id, 10, Some(20));
-    assert!(
-      s.receive(
-        1,
-        2,
-        10,
-        ImageTransfer::Reply {
-          id,
-          first: true,
-          filename: Some(b"image.png".to_vec()),
-          data: b"123456789".to_vec()
-        }
-      )
-      .await
-      .is_err()
-    );
-    let events = s.disconnect(1, 10);
-    assert!(matches!(
-      events.as_slice(),
-      [(
-        2,
-        ImageEvent::Unavailable {
-          request_session: 20,
-          ..
-        }
-      )]
-    ));
-    assert!(s.uploads.lock().is_empty());
-  }
-  #[tokio::test]
-  async fn duplicate_start_and_cumulative_overflow_cancel_assembly() {
-    let s = service();
-    let id = ImageId { size: 2, crc32: 1 };
-    for duplicate in [true, false] {
-      s.begin(1, 2, id, 10, Some(20));
-      let (ack, _) = s
-        .receive(
-          1,
-          2,
-          10,
-          ImageTransfer::Reply {
-            id,
-            first: true,
-            filename: Some(b"image.png".to_vec()),
-            data: vec![1],
-          },
-        )
-        .await
-        .unwrap();
-      assert_eq!(ack, AckStatus::Delivered);
-      let (ack, event) = s
-        .receive(
-          1,
-          2,
-          10,
-          ImageTransfer::Reply {
-            id,
-            first: duplicate,
-            filename: duplicate.then(|| b"image.png".to_vec()),
-            data: vec![2, 3],
-          },
-        )
-        .await
-        .unwrap();
-      assert_eq!(ack, AckStatus::NotDelivered);
-      assert!(matches!(
-        event,
-        Some((
-          2,
-          ImageEvent::Unavailable {
-            request_session: 20,
-            ..
-          }
-        ))
-      ));
-      assert!(s.uploads.lock().is_empty());
-    }
   }
 }

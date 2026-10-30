@@ -9,7 +9,7 @@ Serwer dla oryginalnego Gadu-Gadu 6.0/6.1, oparty na [projekcie macbury](https:/
 Względem pierwotnego projektu macbury:
 
 - **Naprawione doręczanie offline:** trwała kolejka, kolejność, większe partie po zalogowaniu, poprawne flagi i formatowanie, brak ponownego wysyłania przy zwykłym relogowaniu; zapis przed potwierdzeniem.
-- **Obrazki w rozmowach prywatnych (0.5.0):** format GG6, transfer w częściach, kontrola rozmiaru i CRC32 oraz prywatna kopia w SQLite. Kompletny obrazek można odebrać po wylogowaniu nadawcy i restarcie serwera.
+- **Obrazki w rozmowach prywatnych (0.5.0):** klasyczny tryb GG6, transfer na żądanie od zalogowanego nadawcy, części binarne, kontrola rozmiaru i CRC32. Serwer nie przechowuje trwałych kopii obrazków.
 - **Kontakty i prywatność:** trwały import/eksport listy, dodawanie/usuwanie obserwacji, blokady przed dostarczeniem pierwszej wiadomości, poprawiona niewidoczność i tryb „tylko znajomi”.
 - **Sesje i protokół:** bezpieczne zastępowanie starego połączenia, poprawione bitmaski, obsługa rozszerzeń i odrzucanie niepełnych/przerośniętych ramek.
 - **Nowa rejestracja WWW:** wybór wolnego numeru 1–16777215 albo kolejne numery od 112233; zaproszenia po 3 udane rejestracje, trwałe liczniki i atomowa obsługa równoczesnych prób.
@@ -56,24 +56,26 @@ Gotowy instalator zachowuje zachowanie i kreator oryginalnego GG 6.1; nie jest n
 - Ponowne logowanie zastępuje poprzednią sesję. Dostarczanie i sprzątanie sesji danego konta są serializowane.
 - Działają dodawanie/usuwanie kontaktów, import/eksport listy na serwer, blokowanie nadawcy, niewidoczność i tryb „tylko dla znajomych”. Listy eksportowane są prywatne dla konta; limit 256 KiB.
 
-## Obrazki i odbiór offline
+## Obrazki w klasycznym GG
 
 Obsługa obrazków w rozmowach dwóch osób korzysta z opisu [protokołu libgadu, sekcje 1.6.2.2 i 1.6.3](https://libgadu.github.io/protocol/). Wiadomość niesie położenie obrazka, rozmiar i CRC32; osobne pakiety z pustym tekstem przenoszą żądanie i dane binarne. Implementacja jest własna, napisana na podstawie specyfikacji. Nie wymaga DCC ani dodatkowych portów.
 
-Po przyjęciu wiadomości serwer prosi klienta nadawcy o obrazek w imieniu jej adresata. Dopiero **kompletne dane o poprawnym rozmiarze i CRC32** zapisuje w SQLite. Odbiorca może później pobrać tę kopię, także gdy nadawca jest już offline. Samo potwierdzenie `Queued` dotyczy wiadomości i rezerwacji miejsca — **nie potwierdza zakończenia kopiowania obrazka**. Jeżeli nadawca rozłączy się wcześniej, serwer nie może odtworzyć brakujących bajtów. Automatycznie ponawia próbę po jego powrocie (co najmniej 5 minut od poprzedniej próby dla danego obrazu), o ile klient nadal ma ten obrazek. Jawne żądanie odbiorcy może uruchomić pobranie wcześniej.
+**Pierwsze pobranie wymaga zalogowanego nadawcy, którego klient nadal ma obrazek.** Odbiorca wysyła żądanie, a serwer przekazuje je nadawcy. Dane są składane i sprawdzane w pamięci, przesyłane wyłącznie do sesji, która ich zażądała, po czym bufor jest zwalniany. Serwer nie pobiera obrazków z wyprzedzeniem, nie przechowuje ich w SQLite ani w plikach i nie ponawia żądań automatycznie po ponownym zalogowaniu nadawcy.
 
-Kopia jest dostępna wyłącznie adresatowi konkretnej wiadomości, z uwzględnieniem blokad. Znajomość CRC32 nie daje dostępu do cudzych danych. Transfery są związane z sesją; częściowe lub uszkodzone obrazy nie trafiają do odbiorców. Pakiety sterujące obrazkami nie tworzą pustych wiadomości w historii.
+Tekst i opis obrazka (położenie, rozmiar, CRC32) nadal mogą czekać w kolejce offline i przetrwać restart. Potwierdzenie `Queued` dotyczy tej wiadomości, nie bajtów obrazka. Jeżeli odbiorca zaloguje się po wylogowaniu nadawcy, otrzyma wiadomość, ale próba pobrania grafiki zwróci brak obrazka. Po powrocie nadawcy klient odbiorcy może ponowić żądanie. Obrazki już pobrane mogą pozostać w lokalnej historii klienta; każde nowe pobranie przez serwer ponownie wymaga nadawcy.
+
+Żądanie jest dozwolone tylko adresatowi konkretnej wiadomości, z uwzględnieniem blokad. Baza przechowuje wyłącznie te uprawnienia i identyfikatory obrazków. Znajomość CRC32 nie daje innemu kontu dostępu. Transfery są związane z obiema sesjami i anulowane po rozłączeniu; częściowe lub uszkodzone obrazy nie trafiają do odbiorców. Pakiety sterujące obrazkami nie tworzą pustych wiadomości w historii.
 
 Limity w tej wersji:
 
 - Do **255 KiB na obrazek** (albo mniej, jeżeli klient zgłasza mniejszy limit) i 4 różne obrazki w jednej wiadomości.
-- Rezerwacje i gotowe kopie łącznie: 64 MiB / 4096 rekordów na serwer, 16 MiB / 512 rekordów osobno na nadawcę i na odbiorcę. Wyczerpanie limitu odrzuca całą nową wiadomość jako `MboxFull`; rezerwacja jest atomowa także przy równoczesnym wysyłaniu.
-- Do 64 transferów naraz, 4 od nadawcy i 8 do adresata; 60 sekund na pobranie obrazu. Fragment mieści najwyżej 1909 bajtów opcji protokołu. Obowiązuje również limit 20 żądań obrazków na minutę na sesję oraz ogólne limity pakietów.
-- Obrazki oczekujące na odbiór mają taki sam czas życia jak wiadomość. Po dostarczeniu wiadomości jej rekordy i kopie obrazków są usuwane po godzinie, przy sprzątaniu co 5 minut. Historia klienta może przechowywać własną kopię dłużej.
+- Do 4096 rekordów opisujących obrazki na serwer, 512 osobno na nadawcę i na odbiorcę. Wyczerpanie limitu odrzuca całą nową wiadomość jako `MboxFull`; zapis uprawnień i wiadomości jest atomowy także przy równoczesnym wysyłaniu.
+- Do 64 buforów transferu naraz, 4 od nadawcy i 8 do adresata; 60 sekund na transfer. Gotowy bufor również zajmuje limit, dopóki nie przejmie go sesja odbiorcy. Fragment mieści najwyżej 1909 bajtów opcji protokołu. Obowiązuje również limit 20 żądań obrazków na minutę na sesję oraz ogólne limity pakietów.
+- Opis obrazka i uprawnienie do jego pobrania mają taki sam czas życia jak wiadomość. Po dostarczeniu wiadomości są usuwane po godzinie, przy sprzątaniu co 5 minut. Później serwer nie pozwoli ponownie pobrać tego obrazu na podstawie tej wiadomości; historia klienta może nadal mieć własną kopię.
 
-Obrazy są przechowywane w bazie jako nieszyfrowane BLOB-y i wchodzą do jej kopii zapasowej. Nie ma publicznych adresów HTTP do pobierania obrazków. Serwer nie dekoduje ani nie konwertuje grafiki: format, który potrafi wyświetlić dany klient, zależy od klienta.
+Kopie bazy obejmują tekst i identyfikatory obrazków, ale nie ich zawartość. Nie ma publicznych adresów HTTP do pobierania obrazków. Serwer nie dekoduje ani nie konwertuje grafiki: format, który potrafi wyświetlić dany klient, zależy od klienta.
 
-Testy TCP potwierdzają wymianę PNG/BMP, wiele fragmentów, restart, odtworzenie bazy, izolację kont, limity i błędne transfery. **Interfejs oryginalnego GG 6.0/6.1 wymaga jeszcze próby ręcznej przed wdrożeniem** — niektóre klienty mogą blokować rozpoczęcie wysyłania do osoby offline. Kopia serwerowa zapewnia późniejszy odbiór już przyjętego obrazka; nie zmienia przycisków ani zachowania interfejsu klienta.
+Testy TCP potwierdzają wymianę PNG/BMP, wiele fragmentów, zachowanie kolejki opisów po restarcie, brak automatycznego pobierania i kopii serwerowych, izolację kont, limity i błędne transfery. **Interfejs oryginalnego GG 6.0/6.1 wymaga jeszcze próby ręcznej przed wdrożeniem** — dostępność przycisku wysyłania do osoby offline i ponawianie pobierania zależą od klienta.
 
 ## Budowanie i testy
 
@@ -114,9 +116,9 @@ Kontener nie działa jako root, ma system plików tylko do odczytu, usunięte ca
 
 ### Hasła i istniejąca baza
 
-Wersja upstream przechowywała hasła jawnie. GG6 wymaga odzyskania hasła do obliczenia odpowiedzi na losowe wyzwanie, dlatego fork stosuje XChaCha20-Poly1305 z osobnym kluczem i powiązaniem szyfrogramu z numerem konta. Utrata klucza uniemożliwia logowanie; kopia samej bazy nie wystarcza. Wiadomości, obrazki i kontakty są przechowywane w bazie i wymagają ochrony uprawnień plików/kopii.
+Wersja upstream przechowywała hasła jawnie. GG6 wymaga odzyskania hasła do obliczenia odpowiedzi na losowe wyzwanie, dlatego fork stosuje XChaCha20-Poly1305 z osobnym kluczem i powiązaniem szyfrogramu z numerem konta. Utrata klucza uniemożliwia logowanie; kopia samej bazy nie wystarcza. Wiadomości, identyfikatory obrazków i kontakty są przechowywane w bazie i wymagają ochrony uprawnień plików/kopii.
 
-Wersja 0.5.0 dodaje migrację `20261030020000_images.sql` i tabelę `message_images`, bez zmiany wcześniejszych migracji. Przed aktualizacją zachowaj spójną kopię bazy i klucza. Przy wycofaniu wersji przywróć bazę sprzed migracji (późniejsze wiadomości i rejestracje zostaną wtedy cofnięte); nie uruchamiaj starszej binarki na nowym schemacie. Dotychczasowy `backup.py` obejmuje także obrazki, ponieważ kopiuje całą bazę SQLite.
+Wersja 0.5.0 dodaje migracje `20261030020000_images.sql` i `20261030030000_classicImages.sql`, bez zmiany opublikowanych wcześniej migracji. Końcowa tabela `message_images` zawiera tylko identyfikator wiadomości, rozmiar i CRC32. Druga migracja usuwa kolumny zawartości i nazwy pliku ze wcześniejszej eksperymentalnej wersji gałęzi, zachowując uprawnienia. Dawne kopie tej wersji eksperymentalnej mogą nadal zawierać obrazki. Przed aktualizacją zachowaj spójną kopię bazy i klucza. Przy wycofaniu wersji przywróć bazę sprzed migracji (późniejsze wiadomości i rejestracje zostaną wtedy cofnięte); nie uruchamiaj starszej binarki na nowym schemacie.
 
 Przed migracją istniejącej bazy wykonaj jej pełną, spójną kopię. Uruchomienie z `migrate_plaintext_passwords = true` jednorazowo szyfruje stare hasła w transakcji, wykonuje VACUUM i czyści WAL. Potem wyłącz tę opcję. Bez niej serwer odmawia uruchomienia na jawnych hasłach. Nie można cofnąć się do upstream na zmigrowanej bazie bez przywrócenia kopii sprzed migracji.
 
