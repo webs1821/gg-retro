@@ -1,0 +1,5 @@
+[advisories]
+# SQLx records optional MySQL dependencies in Cargo.lock even with only SQLite
+# enabled. RSA is absent from the resolved build graph. CI separately verifies
+# this; enabling MySQL/RSA requires removing this exception and reevaluation.
+ignore = ["RUSTSEC-2023-0071"]

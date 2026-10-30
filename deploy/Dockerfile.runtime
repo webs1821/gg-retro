@@ -1,0 +1,14 @@
+ARG BASE_IMAGE=debian:trixie-20261027-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+FROM ${BASE_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 gg-retro \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin gg-retro \
+    && install -d -o 10001 -g 10001 /app /data
+COPY --chmod=755 gg-retro /usr/local/bin/gg-retro
+USER 10001:10001
+WORKDIR /app
+EXPOSE 8080 8074
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl --fail --silent --max-time 3 http://127.0.0.1:8080/healthz || exit 1
+ENTRYPOINT ["/usr/local/bin/gg-retro"]

@@ -1,0 +1,11 @@
+bind = "0.0.0.0"
+http_port = 8080
+gg_port = 8074
+db = "/data/gg.db"
+hostname = "gadu-gadu.k13.pl"
+public_scheme = "https"
+# Use the public IPv4 address, never the private address of a Docker bridge.
+advertised_ip = "203.0.113.10"
+advertised_port = 8074
+password_key_file = "/run/secrets/password.key"
+registration_invite_file = "/run/secrets/registration-invite.txt"

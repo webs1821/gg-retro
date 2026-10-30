@@ -1,0 +1,35 @@
+services:
+  gg-retro:
+    image: ${GG_RETRO_IMAGE:-gg-retro:0.4.0}
+    container_name: gg-retro
+    restart: unless-stopped
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    stop_grace_period: 30s
+    ulimits:
+      nofile: {soft: 2048, hard: 2048}
+    tmpfs: [/tmp:size=16m,mode=1777,noexec,nosuid,nodev]
+    dns: [127.0.0.1]
+    ports:
+      - "${GG_BIND_IP:-127.0.0.1}:18074:8080"
+      - "${GG_BIND_IP:-127.0.0.1}:8074:8074"
+    volumes:
+      - ./data:/data
+      - ./config.toml:/app/config.toml:ro
+      - ./secrets/password.key:/run/secrets/password.key:ro
+      - ./secrets/registration-invite.txt:/run/secrets/registration-invite.txt:ro
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "3"}
+    networks: [gg]
+networks:
+  gg:
+    name: gg-retro
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-gg-retro

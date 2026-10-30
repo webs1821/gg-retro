@@ -1,390 +1,67 @@
-<p align="center">
-  <img src="docs/logo.png" alt="GG-Retro">
-</p>
+<p align="center"><img src="docs/logo.png" alt="GG-Retro"></p>
 
-# GG-Retro
+# GG-Retro — fork webs1821
 
-Reimplementacja serwera protokołu Gadu-Gadu 6.0 w języku Rust. Projekt umożliwia uruchomienie własnego serwera kompatybilnego z oryginalnym klientem GG 6.0.
+Serwer dla oryginalnego Gadu-Gadu 6.0/6.1, oparty na [projekcie macbury](https://github.com/macbury/gg-retro). Ten fork poprawia kolejkę offline, zgodność protokołu i wdrożenie publiczne. Licencja autora: [LICENSE](LICENSE).
 
-## Demo
+## Korzystanie z serwera
 
-[![GG-Retro Demo](docs/video-preview.jpg)](https://youtu.be/wgpId9a4DRE)
+1. Otwórz **https://gadu-gadu.k13.pl** i wybierz „Załóż konto”. Kod zaproszenia otrzymasz od właściciela serwera.
+2. Zapisz przydzielony numer. Użyj osobnego hasła: 8–15 znaków ASCII, bez spacji.
+3. Zainstaluj klienta GG 6.1 z zakładki „Pobierz”.
+4. Patcherem na stronie zmodyfikuj **gg.exe z katalogu instalacji**, nie instalator `gg61.exe`. Domena `gadu-gadu.k13.pl` mieści się w polach klienta (16 znaków). Patcher działa lokalnie w przeglądarce i nie wysyła pliku na serwer.
+5. Zapisz zmodyfikowaną kopię w katalogu klienta, uruchom ją i wybierz logowanie na istniejący numer. Wpisz numer i hasło otrzymane na tej stronie.
 
-## Funkcje
+Numery z oficjalnej sieci GG nie są automatycznie kontami na tym serwerze. Rejestracja wewnątrz starego klienta, katalog publiczny, odzyskiwanie hasła e-mailem i DCC/obrazki nie są obsługiwane.
 
-- Logowanie i rejestracja użytkowników
-- Wysyłanie i odbieranie wiadomości
-- Statusy online/offline/zajęty/niewidoczny
-- Kolejkowanie wiadomości offline
-- Formatowanie tekstu (pogrubienie, kursywa, kolory)
+**GG6 przesyła rozmowy bez szyfrowania i używa starego mechanizmu uwierzytelniania.** HTTPS chroni rejestrację, ale nie połączenie komunikatora. To usługa do rozmów retro, nie do przesyłania poufnych danych ani ponownego używania ważnych haseł.
 
-## Pobieranie gotowych wersji
+## Wiadomości i obecność
 
-Nie musisz kompilować projektu samodzielnie! Gotowe pliki wykonywalne dla Windowsa, Linuxa i macOS są dostępne na stronie:
+- Każda zaakceptowana wiadomość jest najpierw zapisywana w SQLite (WAL, `synchronous=FULL`). Potwierdzenie `Queued` oznacza trwałe przyjęcie przez serwer, nie przeczytanie przez odbiorcę; stosujemy je również dla aktywnych odbiorców.
+- Wiadomości offline przetrwają restart procesu. Po zalogowaniu trafiają do odbiorcy w kolejności zapisu, po odebraniu jego listy kontaktów i blokad. Zapisany czas, polskie znaki, klasa i formatowanie są zachowane.
+- Dostarczenie oznaczane jest po każdym udanym zapisie do TCP, osobno dla każdej wiadomości. GG6 nie daje potwierdzenia odbioru przez aplikację: awaria między zapisem TCP a zapisem do bazy może spowodować powtórzenie, a zerwane połączenie po przyjęciu danych przez stos TCP nie dowodzi wyświetlenia wiadomości. Nie obiecujemy exactly-once ani potwierdzeń przeczytania.
+- Limit to 1000 oczekujących wiadomości na odbiorcę i 50 000 wszystkich rekordów kolejki. Pełna skrzynka zwraca `MboxFull`, a nie sukces. Oczekujące wiadomości nie wygasają automatycznie. Dostarczone rekordy są usuwane po godzinie.
+- Ponowne logowanie zastępuje poprzednią sesję. Dostarczanie i sprzątanie sesji danego konta są serializowane.
+- Działają dodawanie/usuwanie kontaktów, import/eksport listy na serwer, blokowanie nadawcy, niewidoczność i tryb „tylko dla znajomych”. Listy eksportowane są prywatne dla konta; limit 256 KiB.
 
-**[📥 Pobierz najnowszą wersję](https://github.com/macbury/gg-retro/releases)**
+## Budowanie i testy
 
-## Szybki start - Windows
+Testowana wersja Rust: **1.99.1**. Serwer buduje się jako `gg-retro`:
 
-**Dla osób nietechnicznych - instrukcja krok po kroku:**
-
-### 1. Pobierz serwer
-
-- Wejdź na [stronę z wydaniami](https://github.com/macbury/gg-retro/releases)
-- Pobierz plik `gg-retro_win64.exe` (dla Windows 64-bit) lub `gg-retro_win32.exe` (dla starszych systemów)
-- Zapisz w dowolnym folderze (np. `C:\gg-retro\`)
-
-### 2. Skonfiguruj nazwę serwera w pliku hosts
-
-**To najważniejszy krok!** Dzięki niemu klient GG będzie wiedział gdzie szukać serwera.
-
-1. Otwórz Notatnik **jako Administrator**:
-   - Wyszukaj "Notatnik" w menu Start
-   - Kliknij prawym → "Uruchom jako administrator"
-
-2. Otwórz plik: `C:\Windows\System32\drivers\etc\hosts`
-   - W Notatniku: Plik → Otwórz
-   - Wpisz ścieżkę: `C:\Windows\System32\drivers\etc\hosts`
-   - Zmień filtr na "Wszystkie pliki (*.*)"
-
-3. Dodaj na końcu pliku:
-   ```
-   127.0.0.1  gg-retro.local
-   ```
-
-4. Zapisz plik (Ctrl+S)
-
-### 3. Uruchom serwer
-
-1. Utwórz plik `config.toml` w folderze z serwerem:
-   ```toml
-   bind = "0.0.0.0"
-   http_port = 80
-   gg_port = 8074
-   db = "./gg.db"
-   hostname = "gg-retro.local"
-   ```
-
-2. Kliknij dwukrotnie `gg-retro_win64.exe`
-   - Jeśli Windows wyświetli ostrzeżenie, kliknij "Więcej informacji" → "Uruchom mimo to"
-   - Serwer uruchomi się w oknie konsoli
-
-**Jeśli port 80 wymaga uprawnień administratora**, zmień `http_port` na `8080` w `config.toml`
-
-### 4. Połącz klienta GG
-
-1. Otwórz przeglądarkę i wejdź na: `http://gg-retro.local` (lub `http://gg-retro.local:8080` jeśli zmieniłeś port)
-
-2. **Pobierz klienta GG:**
-   - Zakładka "Pobierz" → pobierz `gg61.exe`
-
-3. **Spatchuj klienta:**
-   - Zakładka "Patcher"
-   - Wybierz pobrany `gg61.exe`
-   - Adres serwera: `gg-retro.local`
-   - Kliknij "Patchuj plik" → pobierz spatchowany plik
-
-4. **Zarejestruj konto:**
-   - Zakładka "Rejestracja" → zarejestruj nowe konto GG
-
-5. **Uruchom spatchowanego klienta i zaloguj się!** 🎉
-
-**Dla zaawansowanych:** Jeśli masz własną domenę, możesz użyć jej zamiast `gg-retro.local` (max 16 znaków).
-
-## Wymagania
-
-- Rust 1.90+
-- SQLite
-- [Klient Gadu-Gadu 6.0](https://www.dobreprogramy.pl/gadu-gadu-gg,program,windows,6628204058663041)
-
-## Testowanie
-
-```bash
-# Wszystkie testy
-cargo test
-
-# Testy protokołu
-cargo test -p gg-protocol
-
-# Testy serwera
-cargo test -p gg-server
+```sh
+cargo build --locked --release -p gg-server
+cargo test --locked --workspace
+GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/wire_integration.py
+node tests/patcher.test.cjs
+cargo install cargo-audit --version 0.22.2 --locked
+sh tests/check-audit-graph.sh
 ```
 
-## Budowanie pakietów
+Testy integracyjne tworzą wyłącznie tymczasową bazę i fikcyjne konta. Obejmują m.in. 205 wiadomości po nagłym zatrzymaniu procesu, kolejność, blokady przed synchronizacją, przejęcie sesji, prywatność statusów, import listy i granicę pojemności skrzynki. Testy kodeka sprawdzają też skrócone i nieznane ramki w obu kierunkach.
 
-### Linux (.deb)
+`Cargo.lock` zawiera opcjonalne RSA/MySQL z SQLx, mimo że nie są włączone ani kompilowane. Wyjątek `RUSTSEC-2023-0071` w `.cargo/audit.toml` jest połączony z testem ich nieobecności w grafie budowania. Włączenie MySQL wymaga ponownego audytu. Pozostają informacyjne ostrzeżenia o nieutrzymywanych bibliotekach `basic-toml`, `paste`, `ttf-parser`; parser fontu dostaje wyłącznie osadzony font CAPTCHA, nie pliki od klientów.
 
-```bash
-make amd64   # x86_64
-make rpi64   # Raspberry Pi 64-bit (Pi 3/4/5)
-make rpi32   # Raspberry Pi 32-bit (Pi 2/3/4)
-make linux   # wszystkie architektury Linux
-make deb     # wszystkie pakiety .deb
-```
+## Wdrożenie
 
-### Windows (.exe)
+Przykłady znajdują się w [deploy](deploy). Nie zawierają haseł ani kluczy. `advertised_ip` musi być publicznym IPv4, pod którym router przekierowuje TCP 8074. `hostname` służy stronie i patcherowi; `public_scheme` powinno być `https`.
 
-```bash
-make win64   # Windows 64-bit (Windows 7+)
-make win32   # Windows 32-bit (Windows 7+, działa na 32-bit i 64-bit)
-make windows # obie wersje Windows
-```
+1. Zbuduj binarkę Linux amd64 i przygotuj katalog budowania z plikiem `gg-retro` i `deploy/Dockerfile.runtime`.
+2. Zbuduj obraz: `docker build -f Dockerfile.runtime -t gg-retro:0.4.0 .`.
+3. W `/opt/gg-retro` umieść `compose.yaml`, konfigurację z `config.example.toml` oraz katalogi `data` i `secrets`.
+4. Wygeneruj kryptograficznie losowe **32 surowe bajty** do `secrets/password.key` i osobny kod zaproszenia co najmniej 24 znaki do `secrets/registration-invite.txt`. Nie zapisuj ich w Git ani w logach. Katalog `secrets` powinien być dostępny tylko administratorowi, a montowane pliki czytelne dla UID 10001; `data` musi należeć do UID/GID 10001.
+5. W `.env` ustaw `GG_BIND_IP` na IP hosta Containers i opcjonalnie `GG_RETRO_IMAGE`. Domyślne wiązanie portów to bezpieczny loopback.
+6. Zastosuj `egress-guard.sh` jako root i uruchamiaj go po starcie Dockera (OpenRC/systemd). Reguły dotyczą wyłącznie mostu `br-gg-retro`; zachowują odpowiedzi na połączenia przychodzące.
+7. Uruchom `docker compose up -d`. Sprawdź `/healthz` i stan kontenera.
+8. Skonfiguruj nginx według przykładu, z prawidłowym certyfikatem. Port HTTP backendu 18074 powinien być dostępny wyłącznie z routera. Publiczne TCP 8074 przekieruj na host Containers i dopuść w zaporze VM; nie kieruj go do serwera WWW. Dodaj odpowiedni hairpin NAT dla LAN/VPN.
+9. Skonfiguruj codzienne uruchomienie `backup.py` przez root. Tworzy spójne kopie SQLite i kopiuje niezbędny klucz oraz konfigurację; zachowuje 14 ostatnich kopii. Kopie są prywatne i nie są montowane w kontenerze aplikacji.
 
-Wymagania: Windows 7 lub nowszy. Wersja 32-bit działa na wszystkich systemach Windows.
+Kontener nie działa jako root, ma system plików tylko do odczytu, usunięte capabilities, limit 256 MiB i 0,5 CPU. Aplikacja ogranicza ramki, połączenia, tempo pakietów i rozmiar kolejki. nginx ogranicza rejestrację i zapisuje ścieżki bez parametrów zapytań. Sam nginx/Fail2ban dla HTTP nie chroni połączeń przekierowanych przez DNAT — ograniczenia GG działają również w aplikacji.
 
-### macOS
+### Hasła i istniejąca baza
 
-```bash
-make macos-intel  # macOS Intel (macOS 10.12+)
-make macos-arm    # macOS Apple Silicon M1/M2/M3 (macOS 11+)
-make macos        # obie wersje macOS
-```
+Wersja upstream przechowywała hasła jawnie. GG6 wymaga odzyskania hasła do obliczenia odpowiedzi na losowe wyzwanie, dlatego fork stosuje XChaCha20-Poly1305 z osobnym kluczem i powiązaniem szyfrogramu z numerem konta. Utrata klucza uniemożliwia logowanie; kopia samej bazy nie wystarcza. Wiadomości oczekujące i kontakty są przechowywane w bazie i wymagają ochrony uprawnień plików/kopii.
 
-**Uwaga:** Budowanie dla macOS wymaga natywnego Maca lub GitHub Actions z macos-runner.
+Przed migracją istniejącej bazy wykonaj jej pełną, spójną kopię. Uruchomienie z `migrate_plaintext_passwords = true` jednorazowo szyfruje stare hasła w transakcji, wykonuje VACUUM i czyści WAL. Potem wyłącz tę opcję. Bez niej serwer odmawia uruchomienia na jawnych hasłach. Nie można cofnąć się do upstream na zmigrowanej bazie bez przywrócenia kopii sprzed migracji.
 
-### Wszystkie platformy
-
-```bash
-make all     # Linux + Windows
-make clean   # czyszczenie
-```
-
-Pakiety znajdziesz w katalogu `dist/`.
-
-Wymagane narzędzia (`cross`, `cargo-deb`) instalują się automatycznie.
-
-### Instalacja pakietu
-
-```bash
-sudo dpkg -i dist/gg-retro_*.deb
-
-# Uruchomienie serwera
-sudo systemctl start gg-retro
-
-# Włączenie autostartu
-sudo systemctl enable gg-retro
-```
-
-| Ścieżka | Opis |
-|---------|------|
-| `/etc/gg-retro/config.toml` | Konfiguracja |
-| `/var/lib/gg-retro/gg.db` | Baza danych |
-| `journalctl -u gg-retro` | Logi |
-
-### Uruchomienie na macOS
-
-```bash
-./gg-retro_macos_arm   # Apple Silicon
-./gg-retro_macos_intel # Intel Mac
-```
-
-Konfiguracja analogiczna jak na Linux (zmienne środowiskowe lub `config.toml`).
-
-## Uruchamianie
-
-### Serwer
-
-```bash
-cargo run --bin gg-server
-```
-
-Serwer nasłuchuje na:
-- Port 8074: Protokół GG (TCP)
-- Port 80: API HTTP (rejestracja, CAPTCHA, discovery)
-
-## Konfiguracja serwera
-
-Serwer może być konfigurowany na trzy sposoby (w kolejności priorytetów):
-
-### 1. Zmienne środowiskowe (najwyższy priorytet)
-
-```bash
-GG_BIND=0.0.0.0 GG_HTTP_PORT=8080 GG_GG_PORT=8074 GG_DB=./gg.db cargo run --bin gg-retro
-```
-
-### 2. Plik `config.toml`
-
-Stwórz plik `config.toml` w katalogu głównym projektu:
-
-```toml
-bind = "0.0.0.0"
-http_port = 80
-gg_port = 8074
-db = "./gg.db"
-hostname = "gg-retro.local"
-```
-
-### 3. Wartości domyślne (najniższy priorytet)
-
-Jeśli nie podano żadnej konfiguracji, serwer użyje wartości domyślnych:
-- `bind`: `0.0.0.0` - nasłuchiwanie na wszystkich interfejsach
-- `http_port`: `80` - port HTTP API
-- `gg_port`: `8074` - port protokołu GG
-- `db`: `./gg.db` - ścieżka do bazy danych SQLite
-- `hostname`: `gg-retro.local` - nazwa hosta serwera
-
-**Uwaga:** Zmienne środowiskowe nadpisują ustawienia z pliku, a plik nadpisuje wartości domyślne.
-
-### Klient testowy
-
-```bash
-cargo run --bin gg-client
-```
-
-## Pobieranie klienta GG
-
-Klient Gadu-Gadu 6.1 jest dostępny do pobrania ze strony serwera GG-Retro (zakładka "Pobierz").
-
-### Weryfikacja sumy kontrolnej
-
-```
-SHA256: bcc8157aa6bface009d8018c308bf3cef8725546b4f826bdbaf6bbeaa953b06f  gg61.exe
-```
-
-**Windows (PowerShell):**
-```powershell
-Get-FileHash gg61.exe -Algorithm SHA256
-```
-
-**Linux/macOS:**
-```bash
-sha256sum gg61.exe
-```
-
-## Konfiguracja klienta GG
-
-Aby połączyć oryginalnego klienta GG 6.0 z własnym serwerem, masz dwie opcje:
-
-### Opcja 1: Plik hosts
-
-Dodaj wpisy do pliku hosts:
-
-**Windows:** `C:\Windows\System32\drivers\etc\hosts`
-**Linux/Mac:** `/etc/hosts`
-
-```
-127.0.0.1  appmsg.gadu-gadu.pl
-127.0.0.1  appsrv.gadu-gadu.pl
-127.0.0.1  register.gadu-gadu.pl
-```
-
-**Uwaga:** Po zmianie wpisów wyczyść cache rejestru GG - klient cachuje adresy serwerów.
-
-### Opcja 2: Patchowanie pliku wykonywalnego (zalecane)
-
-Użyj wbudowanego patchera na stronie głównej serwera (zakładka "Patcher").
-
-Patcher zamienia domenę `gadu-gadu.pl` na Twoją domenę (max 16 znaków) bezpośrednio w przeglądarce - plik nie jest wysyłany na serwer.
-
-**Wymagania:**
-- Serwer GG-Retro musi być uruchomiony na porcie 80 (HTTP API)
-- Musisz mieć skonfigurowaną domenę wskazującą na serwer
-- Domenę możesz ustawić w:
-  - Pliku `/etc/hosts` (Linux/Mac) lub `C:\Windows\System32\drivers\etc\hosts` (Windows)
-  - Pi-hole (jeśli używasz lokalnego DNS)
-  - Lokalnym serwerze DNS
-
-Przykładowa konfiguracja domeny w `/etc/hosts`:
-```
-192.168.1.100  gg-retro.local
-```
-
-**Patchowanie:**
-
-1. Otwórz stronę serwera GG-Retro (np. `http://gg-retro.local`)
-2. Przejdź do zakładki "Patcher"
-3. Wybierz plik `gg.exe`
-4. Wpisz adres serwera (np. `gg-retro.local`)
-5. Kliknij "Patchuj plik"
-6. Pobierz spatchowany plik
-
-## Uruchamianie GG 6.0 na Linuxie (Wine)
-
-### Instalacja Wine
-
-**Arch/Manjaro:**
-```bash
-sudo pacman -S wine winetricks
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt install wine winetricks
-```
-
-**Fedora:**
-```bash
-sudo dnf install wine winetricks
-```
-
-### Konfiguracja
-
-Stwórz dedykowany prefix Wine i ustaw Windows XP:
-
-```bash
-WINEPREFIX=~/.wine-xp winecfg
-```
-
-W oknie konfiguracji wybierz **Windows XP**, zamknij.
-
-### Instalacja komponentów IE
-
-GG używa wbudowanego Internet Explorera do wyświetlania HTML:
-
-```bash
-WINEPREFIX=~/.wine-xp winetricks ie8
-```
-
-Jeśli ie8 sprawia problemy, spróbuj ie6:
-
-```bash
-WINEPREFIX=~/.wine-xp winetricks ie6
-```
-
-Dodatkowe komponenty:
-
-```bash
-WINEPREFIX=~/.wine-xp winetricks mshtml riched20 riched30
-```
-
-### Uruchomienie
-
-```bash
-WINEPREFIX=~/.wine-xp wine gg_patched.exe
-```
-
-## Struktura projektu
-
-```
-gg-retro/
-├── protocol/     # Implementacja protokołu GG
-├── server/       # Serwer GG (TCP + HTTP + patcher webowy)
-├── client/       # Klient testowy
-└── docs/         # Dokumentacja protokołu
-```
-
-## Reklamy
-- 222x33
-- 400x50
-
-## Baza danych
-
-Serwer używa SQLite. Plik bazy: `./gg.db`
-
-Migracje uruchamiają się automatycznie przy starcie serwera.
-
-## Czego brakuje
-
-- Wysyłanie obrazków (GG 6.0 używa DCC, nie przechodzi przez serwer)
-- Publiczny katalog użytkowników
-- Przypomnienie hasła (email)
-
-## Dokumentacja protokołu
-
-Pełna dokumentacja protokołu GG znajduje się w `docs/protocol.md` (po polsku).
-
-Przydatne źródło: https://libgadu.net/protocol/
-
-## Licencja
-
-MIS License - zobacz plik [LICENSE](LICENSE)
+Kod zaproszenia można zmienić przez podmianę jego pliku i restart kontenera. Nie zmienia to haseł istniejących kont. Klucza do haseł nie wolno podmieniać bez procedury migracji szyfrogramów.
