@@ -92,9 +92,10 @@
 
       <div id="register" class="section">
         <h1>Załóż konto na {{ hostname }}</h1>
-        <p>Poproś właściciela o kod zaproszenia. Otrzymasz nowy numer GG, działający tylko na tym serwerze.</p>
+        <p>Poproś właściciela o kod zaproszenia. Każdy kod pozwala założyć 3 konta. Wybierz dawny numer GG lub otrzymaj numer automatycznie. Konto działa tylko na tym serwerze; nie jest powiązane z oficjalną siecią GG.</p>
         <div class="info-box">Klient GG 6.1 przesyła rozmowy bez szyfrowania. Użyj osobnego hasła, którego nie stosujesz w innych usługach.</div>
         <form id="registerForm">
+          <div class="form-group"><label for="requested_uin">Twój dawny numer GG (opcjonalnie)</label><input id="requested_uin" name="requested_uin" type="text" inputmode="numeric" pattern="[0-9]{1,8}" maxlength="8" autocomplete="off" aria-describedby="numberHelp"><p id="numberHelp">Możesz wybrać wolny numer od 1 do 16777215. Zostaw puste pole, aby otrzymać kolejny wolny numer od 112233. Numery poniżej 112233 są przydzielane tylko na życzenie.</p></div>
           <div class="form-group"><label for="invite">Kod zaproszenia</label><input id="invite" name="invite" type="password" autocomplete="off" required maxlength="128"></div>
           <div class="form-group"><label for="email">E-mail</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="254"></div>
           <div class="form-group"><label for="pwd">Hasło: 8–15 znaków ASCII, bez spacji</label><input id="pwd" name="pwd" type="password" autocomplete="new-password" required minlength="8" maxlength="15" pattern="[!-~]{8,15}"></div>

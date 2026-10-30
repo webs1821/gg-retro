@@ -3,13 +3,8 @@
 use crate::models::RepositoryError;
 use crate::security::PasswordVault;
 use gg_protocol::GGNumber;
-use rand::Rng;
 use sqlx::{FromRow, Pool, Sqlite};
 use tracing::{info, instrument};
-
-/// Assigned numbers stay within the 24-bit GG6 address space.
-const MIN_UIN: u32 = 1_000_000;
-const MAX_UIN: u32 = 6_699_999;
 
 /// User record from database.
 #[derive(Clone, FromRow)]
@@ -43,31 +38,6 @@ impl UserRepository {
   /// Create a new repository with the given database pool.
   pub fn new(pool: &Pool<Sqlite>) -> Self {
     Self { pool: pool.clone() }
-  }
-
-  /// Create a new user and return it with the assigned UIN.
-  #[instrument(skip_all)]
-  pub async fn create(
-    &self,
-    name: &str,
-    email: &str,
-    password: &str,
-    vault: &PasswordVault,
-  ) -> Result<User, RepositoryError> {
-    // todo: add validation, min password length
-    let uin = rand::rng().random_range(MIN_UIN..=MAX_UIN);
-    let result = sqlx::query_as::<_, User>(
-      "INSERT INTO users (uin, name, email, password) VALUES (?, ?, ?, ?) RETURNING *",
-    )
-    .bind(uin)
-    .bind(name)
-    .bind(email)
-    .bind(vault.seal(password, uin)?)
-    .fetch_one(&self.pool)
-    .await?;
-
-    info!(uin = result.uin, "User created");
-    Ok(result)
   }
 
   /// Find a user by UIN.
@@ -182,12 +152,29 @@ mod tests {
     let repo = UserRepository::new(&pool);
     let vault = PasswordVault::new(&[7; 32]).unwrap();
 
-    // Create
-    let user = repo
-      .create("Test", "test@gg.pl", "hash123", &vault)
+    let invite = "unit-test-invitation-code-12345";
+    super::super::registration::sync_invites(&pool, invite)
       .await
       .unwrap();
-    assert!(user.uin > 0);
+    let token = super::super::TokenRepository::new(&pool)
+      .create()
+      .await
+      .unwrap();
+    let user = super::super::registration::create(
+      &pool,
+      &vault,
+      super::super::registration::NewAccount {
+        email: "test@gg.pl",
+        password: "hash123",
+        requested_uin: None,
+        invite,
+        token_id: &token.token_id,
+        captcha: &token.captcha_code,
+      },
+    )
+    .await
+    .unwrap();
+    assert_eq!(user.uin, 112233);
 
     // Find
     let found = repo.find_by_uin(user.uin).await.unwrap().unwrap();

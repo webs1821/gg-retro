@@ -62,7 +62,6 @@ pub struct AppState {
   message_dispatcher: MessageDispatcher,
   config: ServerConfig,
   vault: PasswordVault,
-  invite: Zeroizing<String>,
   pub admission: Arc<Admission>,
 }
 impl AppState {
@@ -80,10 +79,6 @@ impl AppState {
   }
   pub fn vault(&self) -> &PasswordVault {
     &self.vault
-  }
-  pub fn invite_matches(&self, offered: &str) -> bool {
-    use subtle::ConstantTimeEq;
-    self.invite.as_bytes().ct_eq(offered.as_bytes()).into()
   }
   pub fn host_uri(&self, path: &str) -> Result<Uri, http::Error> {
     Uri::builder()
@@ -103,14 +98,6 @@ pub async fn create_app_state() -> Result<SharedAppState, Box<dyn std::error::Er
     .extract()?;
   let key = Zeroizing::new(std::fs::read(&config.password_key_file)?);
   let vault = PasswordVault::new(&key)?;
-  let invite = Zeroizing::new(
-    std::fs::read_to_string(&config.registration_invite_file)?
-      .trim()
-      .to_owned(),
-  );
-  if invite.len() < 24 {
-    return Err("registration invite must contain at least 24 characters".into());
-  }
   if !matches!(config.public_scheme.as_str(), "http" | "https") {
     return Err("invalid public scheme".into());
   }
@@ -145,6 +132,9 @@ pub async fn create_app_state() -> Result<SharedAppState, Box<dyn std::error::Er
     }
   }
   tx.commit().await?;
+  let invites = Zeroizing::new(std::fs::read_to_string(&config.registration_invite_file)?);
+  crate::models::registration::sync_invites(&db_pool, &invites).await?;
+  drop(invites);
   if config.migrate_plaintext_passwords {
     sqlx::query("VACUUM").execute(&db_pool).await?;
     sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -163,7 +153,6 @@ pub async fn create_app_state() -> Result<SharedAppState, Box<dyn std::error::Er
     message_dispatcher,
     config,
     vault,
-    invite,
     admission: Arc::new(Admission::default()),
   }))
 }

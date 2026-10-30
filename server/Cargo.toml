@@ -1,6 +1,6 @@
 [package]
 name = "gg-server"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Serwer protokolu Gadu-Gadu 6.0"
 license = "MIS"
@@ -54,4 +54,5 @@ axum-embed = "0.1"
 chacha20poly1305 = "0.11.0"
 base64 = "0.22"
 zeroize = "1.8"
+sha2 = "0.10.9"
 subtle = "2.6"

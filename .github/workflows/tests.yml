@@ -16,6 +16,8 @@ jobs:
       - run: cargo build --locked -p gg-server
       - name: TCP and HTTP integration tests
         run: GG_RETRO_BINARY="$PWD/target/debug/gg-retro" python3 tests/wire_integration.py
+      - name: Registration, invitation quotas and concurrency
+        run: GG_RETRO_BINARY="$PWD/target/debug/gg-retro" python3 tests/registration_integration.py
       - run: node tests/patcher.test.cjs
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: sh tests/check-audit-graph.sh

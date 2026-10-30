@@ -22,8 +22,18 @@
       const response = await fetch('/appsvc/fmregister3.asp', {method: 'POST', body: new URLSearchParams(new FormData(form))});
       const reply = await response.text();
       if (!response.ok || !/^reg_success:\d+$/.test(reply)) {
-        await refresh();
-        throw new Error('Nie udało się założyć konta. Sprawdź zaproszenie, hasło, e-mail i nowy kod z obrazka.');
+        const reasons = {
+          'reg_failed:number_taken': 'Ten numer GG jest już zajęty. Wybierz inny lub zostaw pole puste.',
+          'reg_failed:number_invalid': 'Podaj numer od 1 do 16777215 albo zostaw pole puste.',
+          'reg_failed:invite': 'Kod zaproszenia jest nieprawidłowy, wyłączony lub wykorzystany już 3 razy.',
+          'reg_failed:captcha': 'Kod z obrazka jest nieprawidłowy lub wygasł. Wpisz nowy kod.',
+          'reg_failed:email_taken': 'Na ten adres e-mail istnieje już konto.',
+          'reg_failed:capacity': 'Nie można teraz założyć kolejnego konta. Skontaktuj się z właścicielem.'
+        };
+        const message = response.status === 429 ? 'Zbyt wiele prób. Odczekaj minutę i spróbuj ponownie.' :
+          (reasons[reply] || 'Nie udało się założyć konta. Sprawdź zaproszenie, hasło i e-mail.');
+        try { await refresh(); } catch (_) { /* Keep the useful registration error. */ }
+        throw new Error(message + (reply.startsWith('reg_failed') || response.status === 429 ? ' Nie zużyto użycia zaproszenia.' : ' Spróbuj ponownie za chwilę.'));
       }
       status.textContent = 'Twój numer GG: ' + reply.split(':')[1] + '. Zapisz go i użyj z wybranym hasłem w zmodyfikowanym kliencie GG 6.1.';
       form.reset(); form.hidden = true;

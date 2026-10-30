@@ -6,6 +6,7 @@ use sqlx::{Pool, Sqlite};
 use thiserror::Error;
 
 pub mod message;
+pub mod registration;
 pub mod token;
 pub mod user;
 
@@ -16,6 +17,8 @@ pub use user::UserRepository;
 
 #[derive(Error, Debug)]
 pub enum RepositoryError {
+  #[error(transparent)]
+  Registration(#[from] registration::RegistrationFailure),
   #[error("Credential encryption failed (check the separate key file)")]
   Secret,
   #[error("Mailbox capacity reached")]
@@ -27,6 +30,7 @@ pub enum RepositoryError {
 impl IntoResponse for RepositoryError {
   fn into_response(self) -> Response {
     match self {
+      Self::Registration(reason) => (StatusCode::OK, reason.to_string()).into_response(),
       error => {
         tracing::error!(error = ?error, "failed to finish response because of repository error");
         (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()

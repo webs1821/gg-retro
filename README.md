@@ -7,7 +7,7 @@ Serwer dla oryginalnego Gadu-Gadu 6.0/6.1, oparty na [projekcie macbury](https:/
 ## Korzystanie z serwera
 
 1. Otwórz **https://gadu-gadu.k13.pl** i wybierz „Załóż konto”. Kod zaproszenia otrzymasz od właściciela serwera.
-2. Zapisz przydzielony numer. Użyj osobnego hasła: 8–15 znaków ASCII, bez spacji.
+2. Opcjonalnie wpisz własny wolny numer (1–16777215). Puste pole przydziela kolejne wolne numery od 112233; niższe są dostępne wyłącznie przez ręczny wybór. Zapisz przydzielony numer. Użyj osobnego hasła: 8–15 znaków ASCII, bez spacji.
 3. Zainstaluj klienta GG 6.1 z zakładki „Pobierz”.
 4. Patcherem na stronie zmodyfikuj **gg.exe z katalogu instalacji**, nie instalator `gg61.exe`. Domena `gadu-gadu.k13.pl` mieści się w polach klienta (16 znaków). Patcher działa lokalnie w przeglądarce i nie wysyła pliku na serwer.
 5. Zapisz zmodyfikowaną kopię w katalogu klienta, uruchom ją i wybierz logowanie na istniejący numer. Wpisz numer i hasło otrzymane na tej stronie.
@@ -33,6 +33,7 @@ Testowana wersja Rust: **1.99.1**. Serwer buduje się jako `gg-retro`:
 cargo build --locked --release -p gg-server
 cargo test --locked --workspace
 GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/wire_integration.py
+GG_RETRO_BINARY="$PWD/target/release/gg-retro" python3 tests/registration_integration.py
 node tests/patcher.test.cjs
 cargo install cargo-audit --version 0.22.2 --locked
 sh tests/check-audit-graph.sh
@@ -47,9 +48,9 @@ Testy integracyjne tworzą wyłącznie tymczasową bazę i fikcyjne konta. Obejm
 Przykłady znajdują się w [deploy](deploy). Nie zawierają haseł ani kluczy. `advertised_ip` musi być publicznym IPv4, pod którym router przekierowuje TCP 8074. `hostname` służy stronie i patcherowi; `public_scheme` powinno być `https`.
 
 1. Zbuduj binarkę Linux amd64 i przygotuj katalog budowania z plikiem `gg-retro` i `deploy/Dockerfile.runtime`.
-2. Zbuduj obraz: `docker build -f Dockerfile.runtime -t gg-retro:0.4.0 .`.
+2. Zbuduj obraz: `docker build -f Dockerfile.runtime -t gg-retro:0.4.1 .`.
 3. W `/opt/gg-retro` umieść `compose.yaml`, konfigurację z `config.example.toml` oraz katalogi `data` i `secrets`.
-4. Wygeneruj kryptograficznie losowe **32 surowe bajty** do `secrets/password.key` i osobny kod zaproszenia co najmniej 24 znaki do `secrets/registration-invite.txt`. Nie zapisuj ich w Git ani w logach. Katalog `secrets` powinien być dostępny tylko administratorowi, a montowane pliki czytelne dla UID 10001; `data` musi należeć do UID/GID 10001.
+4. Wygeneruj kryptograficznie losowe **32 surowe bajty** do `secrets/password.key` i pulę kodów: `python3 deploy/generate_invites.py --count 100 --output secrets/registration-invite.txt`. Nie zapisuj ich w Git ani w logach. Katalog `secrets` powinien być dostępny tylko administratorowi, a montowane pliki czytelne dla UID 10001; `data` musi należeć do UID/GID 10001.
 5. W `.env` ustaw `GG_BIND_IP` na IP hosta Containers i opcjonalnie `GG_RETRO_IMAGE`. Domyślne wiązanie portów to bezpieczny loopback.
 6. Zastosuj `egress-guard.sh` jako root i uruchamiaj go po starcie Dockera (OpenRC/systemd). Reguły dotyczą wyłącznie mostu `br-gg-retro`; zachowują odpowiedzi na połączenia przychodzące.
 7. Uruchom `docker compose up -d`. Sprawdź `/healthz` i stan kontenera.
@@ -64,4 +65,10 @@ Wersja upstream przechowywała hasła jawnie. GG6 wymaga odzyskania hasła do ob
 
 Przed migracją istniejącej bazy wykonaj jej pełną, spójną kopię. Uruchomienie z `migrate_plaintext_passwords = true` jednorazowo szyfruje stare hasła w transakcji, wykonuje VACUUM i czyści WAL. Potem wyłącz tę opcję. Bez niej serwer odmawia uruchomienia na jawnych hasłach. Nie można cofnąć się do upstream na zmigrowanej bazie bez przywrócenia kopii sprzed migracji.
 
-Kod zaproszenia można zmienić przez podmianę jego pliku i restart kontenera. Nie zmienia to haseł istniejących kont. Klucza do haseł nie wolno podmieniać bez procedury migracji szyfrogramów.
+Plik zaproszeń zawiera po jednym kodzie w każdym wierszu. Każdy kod pozwala na **3 udane rejestracje**. Baza przechowuje wyłącznie skróty SHA-256 kodów oraz trwałe liczniki użyć. Rejestracja konta, zużycie kodu/CAPTCHA i przydzielenie numeru są jedną transakcją. Błędna próba (także zajęty numer lub e-mail) nie zużywa zaproszenia ani numeru automatycznego. Równoczesne rejestracje nie przekraczają limitu.
+
+Po zmianie pliku odtwórz kontener (`docker compose up -d --force-recreate gg-retro`), aby odczytał aktualny plik. Usunięty kod zostaje wyłączony. Przywrócenie kodu i restart nie zerują licznika, a usunięcie konta nie zwraca użycia. Pusty plik zamyka rejestrację bez blokowania logowania istniejących kont. Liczniki kodów i kolejny numer są częścią kopii SQLite; odtworzenie starszej kopii cofa także te liczniki, dlatego przy odtwarzaniu po utracie nowszych rejestracji należy unieważnić dawne kody i wydać nową pulę.
+
+Ręcznie wybrany wysoki numer nie przesuwa numeracji automatycznej. Zajęte numery są pomijane, a istniejące konta zachowują numery po migracji. Nowa numeracja ma własny trwały licznik od 112233, niezależny od dawnego losowania i SQLite AUTOINCREMENT. Limit 16777215 wynika z 24-bitowego pola GG6.
+
+Zmiana puli zaproszeń nie zmienia haseł istniejących kont. Klucza do haseł nie wolno podmieniać bez procedury migracji szyfrogramów.

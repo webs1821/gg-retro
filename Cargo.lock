@@ -926,7 +926,7 @@ version = "0.1.0"
 
 [[package]]
 name = "gg-server"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ab_glyph",
  "askama",
@@ -944,6 +944,7 @@ dependencies = [
  "rand 0.9.5",
  "rust-embed",
  "serde",
+ "sha2 0.10.9",
  "sqlx",
  "subtle",
  "thiserror",
