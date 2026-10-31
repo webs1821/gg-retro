@@ -4,6 +4,8 @@ The original installer is pinned by SHA256. Its executable stub, script/header,
 license, resources and every other payload byte are preserved. Only gg.exe is
 replaced; the compressed stream length and NSIS CRC32 are recalculated.
 No Windows executable is executed by this tool.
+The shared browser/CLI patcher also disables the obsolete updater and fixes the
+default sound basenames in gg.exe; the rebuilt installer installs that same EXE.
 """
 import argparse, hashlib, json, lzma, pathlib, re, struct, subprocess, tempfile, tomllib, zlib
 

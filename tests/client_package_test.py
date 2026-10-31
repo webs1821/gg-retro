@@ -15,6 +15,19 @@ spec.loader.exec_module(builder)
 
 
 class ClientPackageTests(unittest.TestCase):
+    def test_real_client_fixes_and_input_guards(self):
+        with tempfile.TemporaryDirectory(prefix='gg-client-fixes-') as tmp:
+            directory = pathlib.Path(tmp)
+            stream = builder.unpack((ROOT / 'server/static/gg61.exe').read_bytes())[3]
+            original = directory / 'gg.exe'
+            original.write_bytes(builder.extract_client(stream))
+            header = directory / 'installer-header.bin'
+            header.write_bytes(stream[:4+int.from_bytes(stream[:4], 'little')])
+            result = subprocess.run(['node', str(ROOT / 'tests/client_fixes.test.cjs'),
+                                     str(original), str(header)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            print(result.stdout.strip())
+
     def test_rebuild_and_reject_wrong_inputs(self):
         with tempfile.TemporaryDirectory(prefix='gg-package-') as tmp:
             root = pathlib.Path(tmp)
@@ -39,6 +52,8 @@ class ClientPackageTests(unittest.TestCase):
             self.assertEqual(after.replace(client, builder.extract_client(before)), before)
             self.assertIn(b'gg.example.org', client)
             self.assertNotEqual(builder.sha(client), builder.ORIGINAL_CLIENT_SHA256)
+            self.assertEqual(client[0x841bc:0x841cf], b'wiadomosc\0dostepny\0')
+            self.assertEqual(client[0x45f80:0x45f92], bytes.fromhex('31c0c3909090') * 3)
             # Never overwrite a previous release, even with the same configuration.
             self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
             self.assertEqual((output / 'gg-setup.exe').read_bytes(), installer)

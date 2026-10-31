@@ -57,7 +57,9 @@ try:
     w.record('configured links, digests and replacement instructions',
              '/downloads/gg.exe' in html and '/downloads/gg-setup.exe' in html
              and client_hash in html and installer_hash in html
-             and 'Program Files' in html and 'dobreprogramy' not in html.lower())
+             and 'Program Files' in html and 'dobreprogramy' not in html.lower()
+             and 'update.tmp' in html and 'domyślne dźwięki' in html
+             and '/static/patcher.js?v=' in html)
     w.record('fixed routes cannot expose manifest or traverse files',
              get('/downloads/manifest.toml')[0] == 404
              and get('/downloads/../password.key')[0] == 404)

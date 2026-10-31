@@ -8,6 +8,7 @@ Serwer dla oryginalnego Gadu-Gadu 6.0/6.1, oparty na [projekcie macbury](https:/
 
 Względem pierwotnego projektu macbury:
 
+- **Klient GG 6.1 (0.7.1):** wyłączony dawny aktualizator powodujący pytanie UAC o `update.tmp`; poprawione domyślne nazwy dźwięków na `sounds/wiadomosc.wav` i `sounds/dostepny.wav`. Gotowy EXE, instalator i patcher WWW korzystają z tych samych poprawek, z kontrolą SHA-256 oryginalnego klienta 6.1.0.158.
 - **Opisy offline (0.7.0):** opis „niedostępny” i opcjonalny czas powrotu są zachowywane po zamknięciu klienta oraz restarcie serwera, razem z blokadami i ustawieniami widoczności.
 - **Ponowne łączenie (0.7.0):** restart zamyka TCP bez pakietu wymuszonego wylogowania. Zmiana na „niedostępny” kończy sesję, a zalogowanie drugiego klienta nadal rozłącza poprzedni. Obecność jest publikowana dopiero po otrzymaniu listy kontaktów i prywatności.
 - **Naprawione doręczanie offline:** trwała kolejka, kolejność, większe partie po zalogowaniu, poprawne flagi i formatowanie, brak ponownego wysyłania przy zwykłym relogowaniu; zapis przed potwierdzeniem.
@@ -27,7 +28,7 @@ Względem pierwotnego projektu macbury:
 2. Opcjonalnie wpisz dawny, wolny numer (1–16777215). Puste pole przydziela kolejny wolny numer od 112233; niższe numery są dostępne tylko ręcznie. Użyj osobnego hasła: 8–15 znaków ASCII, bez spacji.
 3. W „Pobierz” wybierz gotowy instalator, jeśli administrator go udostępnił. W nowej instalacji nie trzeba potem patchować programu.
 4. Jeśli masz już GG 6.1, zamknij je i pobierz gotowy `gg.exe`. Otwórz folder instalacji przez właściwości skrótu, zachowaj poprzedni plik jako `gg.exe.bak`, a pobrany zapisz **w folderze instalacji, obok DLL, emots i skins**. Uruchom go stamtąd.
-5. Alternatywnie zainstaluj oryginalne GG 6.1 i użyj „Patchera” na **gg.exe z folderu instalacji**, nie na instalatorze. Domena musi mieć najwyżej 16 znaków ASCII. Patcher działa lokalnie w przeglądarce.
+5. Alternatywnie zainstaluj oryginalne GG 6.1 i użyj „Patchera” na **oryginalnym gg.exe z folderu instalacji**, nie na instalatorze ani wcześniej patchowanym EXE. Patcher sprawdza dokładną wersję 6.1.0.158 przed zmianą kodu. Domena musi mieć najwyżej 16 znaków ASCII. Patcher działa lokalnie w przeglądarce przez HTTPS lub localhost (Web Crypto).
 6. W komunikatorze wybierz istniejący numer i wpisz numer oraz hasło zarejestrowane na tym serwerze.
 
 Numery z oficjalnej sieci GG nie są automatycznie kontami na tym serwerze. Rejestracja wewnątrz starego klienta, katalog publiczny, odzyskiwanie hasła e-mailem i DCC nie są obsługiwane.
@@ -45,6 +46,8 @@ python3 deploy/render_nginx.py --config config.toml --output dist/nginx.conf
 ```
 
 Generator klienta korzysta z oryginalnego instalatora GG 6.1 o przypiętym SHA-256. Weryfikuje CRC NSIS, wyciąga oryginalny gg.exe, używa tego samego patchera co przeglądarka i zastępuje wyłącznie ten plik w strumieniu instalatora. Odtwarza długość strumienia i CRC, po czym ponownie sprawdza, że pozostała zawartość jest identyczna. Nie uruchamia żadnego EXE. Opcjonalne `--patched-exe plik.exe` pozwala użyć dostarczonego klienta, ale tylko gdy jest identyczny z oczekiwaną modyfikacją dla podanej domeny.
+
+Klient nie uruchamia starego aktualizatora (także po wybraniu jego pozycji w menu). Aktualizacja klienta odbywa się przez pobranie nowego `gg.exe` lub instalatora. `update.dll` pozostaje częścią oryginalnej instalacji, ponieważ EXE nadal importuje tę bibliotekę — nie usuwaj jej. Poprawka dźwięków zachowuje polskie etykiety interfejsu i własne ustawienia użytkownika. Jeśli w profilu zapisano wcześniej błędną pełną ścieżkę, wybierz ponownie istniejący plik WAV w ustawieniach dźwięków.
 
 Skopiuj wynik (`gg.exe`, `gg-setup.exe`, `manifest.toml`) do `/opt/gg-retro/downloads` i ustaw `client_downloads_dir = "/app/downloads"`. Compose montuje ten katalog tylko do odczytu. Pliki nie są osadzane w binarce serwera; zmiana domeny wymaga wygenerowania nowej paczki i restartu. Niezgodna domena lub suma kontrolna powoduje odmowę startu zamiast udostępnienia błędnego klienta. Pusta wartość wyłącza gotowe pliki i zostawia oryginalny instalator oraz patcher.
 

@@ -1,5 +1,39 @@
 // GG-Retro Binary Patcher
-// Replaces all GG server hostnames with custom endpoint
+// GG 6.1.0.158: custom endpoint, disabled legacy updater and correct sound defaults.
+
+const ORIGINAL_CLIENT_SHA256 = '74b78af318c52f86dff8a7ee27a7a0b5ea545167aebb594a8a559ec97f2e3a57';
+
+// Offsets are valid ONLY for the original executable identified by the full hash.
+// Keep this separate from hostname rewriting: an arbitrary EXE must never receive
+// machine-code changes merely because it contains a matching hostname.
+async function patchClient(input, newDomain) {
+  const data = new Uint8Array(input);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+  if (hash !== ORIGINAL_CLIENT_SHA256) {
+    throw new Error('Wybierz oryginalny gg.exe z instalatora GG 6.1 poniżej (wersja 6.1.0.158). Zmienionych plików i innych wersji nie patchujemy; możesz pobrać gotowy klient.');
+  }
+  const results = patchBinary(data, newDomain);
+
+  // Three cdecl import thunks: UpdateNow, SetConnectionStatus and Init. The
+  // caller removes arguments, so xor eax,eax; ret preserves its stack contract.
+  // update.dll remains installed/imported, but none of its updater APIs is called.
+  for (const offset of [0x45f80, 0x45f86, 0x45f8c]) {
+    data.set([0x31, 0xc0, 0xc3, 0x90, 0x90, 0x90], offset);
+  }
+
+  // Reuse the now-unused updater URL's 32-byte, NUL-terminated storage in .rdata.
+  // No sections, resource labels, file names or PE sizes need to change.
+  data.fill(0, 0x841bc, 0x841dc);
+  data.set(toAscii('wiadomosc\0dostepny\0'), 0x841bc);
+  data.set([0x68, 0xbc, 0x41, 0x48, 0x00], 0x33207); // push "wiadomosc"
+  data.set([0x68, 0xc6, 0x41, 0x48, 0x00], 0x33221); // push "dostepny"
+  // Replace translated-label lookup + pop ecx with pop eax + padding. Subsequent
+  // code still reads Sounds/MsgPath or OnlinePath; only the fallback basename
+  // used with <installation directory>\sounds\<basename>.wav changes.
+  data.set([0x58, 0x90, 0x90, 0x90, 0x90, 0x90], 0x33226);
+  return { data, results };
+}
 
 // All known hostnames that need to be replaced
 const HOSTNAMES = [
@@ -14,7 +48,7 @@ const HOSTNAMES = [
   'smsat.gadu-gadu.pl',     // 18 chars - SMS
 ];
 
-const MAX_DOMAIN_LENGTH = Math.min(...HOSTNAMES.map(h => h.length)); // 21 chars
+const MAX_DOMAIN_LENGTH = Math.min(...HOSTNAMES.map(h => h.length)); // 16 chars
 
 // Convert string to UTF-16LE bytes
 function toUtf16Le(str) {
@@ -126,34 +160,22 @@ function patchFile(event) {
   statusDiv.innerHTML = '<div class="info-box">Patchowanie w toku...</div>';
 
   const reader = new FileReader();
-  reader.onload = function(e) {
-    const data = new Uint8Array(e.target.result);
-    const originalSize = data.length;
+  reader.onload = async function(e) {
+    try {
+      const { data } = await patchClient(new Uint8Array(e.target.result), newDomain);
+      const blob = new Blob([data], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const outputName = file.name.replace(/\.exe$/i, '') + '_patched.exe';
 
-    const results = patchBinary(data, newDomain);
-    const total = results.ascii + results.utf16;
-
-    if (total === 0) {
-      statusDiv.innerHTML = '<div class="info-box" style="background: #FFE0E0;">Nie znaleziono domen do zamiany. Czy to oryginalny plik GG?</div>';
-      return;
+      statusDiv.replaceChildren();
+      const info = document.createElement('div'); info.className = 'info-box';
+      info.textContent = `Klient przygotowany dla ${newDomain}. Wyłączono stary aktualizator i poprawiono domyślne ścieżki dźwięków. `;
+      const link = document.createElement('a'); link.href = url; link.download = outputName;
+      link.className = 'button'; link.textContent = `Pobierz ${outputName}`;
+      info.append(link); statusDiv.append(info);
+    } catch (error) {
+      statusDiv.textContent = error.message || 'Nie udało się przygotować klienta.';
     }
-
-    if (data.length !== originalSize) {
-      statusDiv.innerHTML = '<div class="info-box" style="background: #FFE0E0;">Blad: zmieniono rozmiar pliku!</div>';
-      return;
-    }
-
-    const blob = new Blob([data], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const outputName = file.name.replace(/\.exe$/i, '') + '_patched.exe';
-
-    statusDiv.replaceChildren();
-    const info = document.createElement('div'); info.className = 'info-box';
-    info.textContent = `Zmieniono ${results.ascii} adresów ASCII i ${results.utf16} UTF-16 na ${newDomain}. `;
-    const link = document.createElement('a'); link.href = url; link.download = outputName;
-    link.className = 'button'; link.textContent = `Pobierz ${outputName}`;
-    info.append(link); statusDiv.append(info);
-
   };
 
   reader.onerror = function() {
