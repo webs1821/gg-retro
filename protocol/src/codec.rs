@@ -49,6 +49,13 @@ impl Encoder<GGPacket> for GGCodec {
 
   fn encode(&mut self, item: GGPacket, dst: &mut BytesMut) -> Result<(), Self::Error> {
     match item {
+      GGPacket::DirectoryRequest(packet) | GGPacket::DirectoryReply(packet) => {
+        let reply = self.mode == CodecMode::Server;
+        let payload = packet.encode(reply)?;
+        dst.put_u32_le(if reply { 0x0e } else { 0x14 });
+        dst.put_u32_le(payload.len() as u32);
+        dst.extend_from_slice(&payload);
+      }
       GGPacket::SendImage(image) => {
         let option = image.transfer.encode()?;
         dst.put_u32_le(packet_type::GG_SEND_MSG);
@@ -306,6 +313,7 @@ impl Decoder for GGCodec {
       (_, 1) => 4,
       (_, 0x15) => 31,
       (_, 2) => 4,
+      (CodecMode::Server, 0x14) | (CodecMode::Client, 0x0e) => 5,
       (CodecMode::Server, 0x0b) => 13,
       (CodecMode::Server, 0x0d | 0x0e) => 5,
       (CodecMode::Server, 0x16) | (CodecMode::Client, 0x10) => 1,
@@ -316,6 +324,11 @@ impl Decoder for GGCodec {
     };
     if length < min {
       return Err(GGError::InvalidFrame("truncated fixed fields"));
+    }
+    if (self.mode == CodecMode::Server && packet_type == 0x14 && length > 4096)
+      || (self.mode == CodecMode::Client && packet_type == 0x0e && length > 32768)
+    {
+      return Err(GGError::InvalidFrame("public directory payload limit"));
     }
     if self.mode == CodecMode::Server
       && matches!(packet_type, 0x0d | 0x0e | 0x0f | 0x10)
@@ -334,6 +347,12 @@ impl Decoder for GGCodec {
     let mut frame = src.split_to(length);
     let src = &mut frame;
     match packet_type {
+      0x14 if self.mode == CodecMode::Server => Ok(Some(GGPacket::DirectoryRequest(
+        crate::packets::DirectoryPacket::decode(src, false)?,
+      ))),
+      0x0e if self.mode == CodecMode::Client => Ok(Some(GGPacket::DirectoryReply(
+        crate::packets::DirectoryPacket::decode(src, true)?,
+      ))),
       0x0d | 0x0e if self.mode == CodecMode::Server => {
         let entry = decode_contact_entries(src, 5).remove(0);
         Ok(Some(if packet_type == 0x0d {

@@ -277,6 +277,8 @@ impl UserSessionController {
     let mut packet_count = 0u32;
     let mut message_count = 0u32;
     let mut image_requests = 0u32;
+    let mut directory_requests = 0u32;
+    let mut directory_writes = 0u32;
     loop {
       tokio::select! {
           biased;
@@ -296,11 +298,21 @@ impl UserSessionController {
           packet = self.protocol.next() => {
               let packet = packet.ok_or(UserSessionError::Closed)??;
               last_packet = Instant::now();
-              if rate_window.elapsed() >= Duration::from_secs(60) { rate_window = Instant::now(); packet_count = 0; message_count = 0; image_requests = 0; }
+              if rate_window.elapsed() >= Duration::from_secs(60) { rate_window = Instant::now(); packet_count = 0; message_count = 0; image_requests = 0; directory_requests = 0; directory_writes = 0; }
               packet_count += 1;
               if packet_count > 600 { return Err(UserSessionError::Limit); }
               match packet {
                   GGPacket::Ping => self.send(GGPacket::Pong).await?,
+                  GGPacket::DirectoryRequest(request) => {
+                      directory_requests += 1;
+                      if request.kind == 1 { directory_writes += 1; }
+                      if directory_requests > 30 || directory_writes > 10 {return Err(UserSessionError::Limit);}
+                      let reply = crate::models::directory::handle(&self.app_state,uin,request).await.map_err(|e| match e {
+                        crate::models::directory::DirectoryError::Invalid => UserSessionError::Protocol(GGError::InvalidFrame("invalid public directory request")),
+                        crate::models::directory::DirectoryError::Database(error) => UserSessionError::Database(error),
+                      })?;
+                      self.send(GGPacket::DirectoryReply(reply)).await?;
+                  }
                   GGPacket::SendImage(message) => {
                       if matches!(message.transfer,ImageTransfer::Request(_)) {
                           image_requests += 1;

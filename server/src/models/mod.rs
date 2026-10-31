@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 use sqlx::{Pool, Sqlite};
 use thiserror::Error;
 
+pub mod directory;
 pub mod images;
 pub mod message;
 pub mod offline_presence;

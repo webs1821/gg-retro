@@ -189,6 +189,30 @@ impl PresenceHub {
     }
   }
 
+  pub fn directory_online_for(&self, viewer: GGNumber) -> Vec<GGNumber> {
+    let candidates: Vec<_> = self
+      .state
+      .read()
+      .values()
+      .filter(|p| {
+        matches!(
+          p.status.base(),
+          GGStatus::Avail | GGStatus::AvailDescr | GGStatus::Busy | GGStatus::BusyDescr
+        )
+      })
+      .map(|p| p.uin)
+      .collect();
+    candidates
+      .into_iter()
+      .filter(|uin| {
+        matches!(
+          self.find_for(*uin, viewer).status.base(),
+          GGStatus::Avail | GGStatus::AvailDescr | GGStatus::Busy | GGStatus::BusyDescr
+        )
+      })
+      .collect()
+  }
+
   pub fn is_blocked(&self, uin: GGNumber, other: GGNumber) -> bool {
     self
       .books

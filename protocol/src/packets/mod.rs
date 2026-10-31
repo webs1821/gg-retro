@@ -1,6 +1,8 @@
 //! GG protocol packet types.
 
+mod directory;
 mod image;
+pub use directory::DirectoryPacket;
 mod login;
 pub use image::{
   GGRecvImage, GGSendImage, ImageId, ImageTransfer, MAX_IMAGE_BYTES, MAX_IMAGE_FILENAME_BYTES,
@@ -20,6 +22,8 @@ pub use notify::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GGPacket {
+  DirectoryRequest(DirectoryPacket),
+  DirectoryReply(DirectoryPacket),
   SendImage(GGSendImage),
   RecvImage(GGRecvImage),
   AddNotify(ContactEntry),
