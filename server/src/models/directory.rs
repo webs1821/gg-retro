@@ -68,7 +68,7 @@ fn number(s: &str, max: u32) -> Result<u32> {
 }
 impl Profile {
   fn fields(&self, own: bool) -> Vec<(String, String)> {
-    let mut result = vec![
+    let mut result: Vec<(String, String)> = vec![
       ("fmnumber".into(), self.uin.to_string()),
       ("firstname".into(), self.firstname.clone()),
       ("nickname".into(), self.nickname.clone()),
@@ -82,6 +82,12 @@ impl Profile {
         ("familycity".into(), self.familycity.clone()),
         ("gender".into(), self.gender.to_string()),
       ]);
+    } else {
+      // GG6's search UI scans for consecutive NULs without tracking whether
+      // a string is a key or a value. Empty values would create phantom people.
+      // READ uses a different parser and must keep blanks to clear form fields.
+      result
+        .retain(|(key, value)| !value.is_empty() && (key != "birthyear" || self.birthyear != 0));
     }
     result
   }

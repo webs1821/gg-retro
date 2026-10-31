@@ -29,6 +29,14 @@ the entire form, not a partial update. Omitted fields must be cleared, and an
 empty form (possibly retaining a gender selection) removes the public profile.
 The authenticated session remains the only authority for profile ownership.
 
+The search results scanner at `0x416d7a` treats consecutive NUL bytes as a new
+person without distinguishing keys from values. An empty city followed by
+birthyear/status therefore produced a second row with no UIN in 0.8.0/0.8.1.
+Version 0.8.2 omits empty text values and unknown birthyears from SEARCH results.
+READ keeps its empty fields because the profile form uses a separate pair-aware
+parser at `0x429027`. Integration tests compare native double-NUL record counts
+with pair-aware parsing, including sparse profiles and multi-page results.
+
 Inspection used the user-supplied, locally patched client with SHA-256
 `1db383709d5ba22f52f21f049697cbc70865db57f034489a2b774cf23944469d`.
 No client binary changes are needed for this server fix. TCP integration tests

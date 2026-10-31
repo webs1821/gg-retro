@@ -29,6 +29,12 @@ def query(client, kind=3, fields=None, fragmented=False, sequence=None):
         current[key]=value
     if current:rows.append(current)
     nextstart=int(rows.pop()['nextstart']) if rows and 'nextstart' in rows[-1] else 0
+    if kind==3:
+        # Native GG6's scanner at 0x416d7a treats any double NUL as a new
+        # person, including empty values. Compare its record count with the
+        # pair-aware protocol parser above, and exclude the pagination footer.
+        native_rows=[part for part in data[5:].split(b'\0\0') if part and not part.lower().startswith(b'nextstart\0')]
+        assert len(native_rows)==len(rows),'native GG6 sees extra search rows'
     return rows,nextstart
 
 def rejected(client, kind, fields):
@@ -56,6 +62,12 @@ def main():
     w.record('own initially empty profile never exposes registration name or email',own['fmnumber']==str(owner) and own['firstname']=='' and 'email' not in own)
     for seq in [0,0xffffffff]:
         w.record('native GG6 READ accepts arbitrary sequence '+str(seq),query(a,2,sequence=seq)[0][0]['firstname']=='')
+    query(a,1,{'firstname':'Jan','nickname':'Retro','birthyear':'1987'})
+    sparse=query(b,fields={'birthyear':'1980 1990'})[0]
+    w.record('native GG6 age search shows one person when city is blank',len(sparse)==1 and sparse[0]['fmnumber']==str(owner) and 'city' not in sparse[0])
+    query(a,1,{'nickname':'Only nick'})
+    sparse=query(b,fields={'fmnumber':owner})[0]
+    w.record('unknown age and blank text are omitted from search results',len(sparse)==1 and set(sparse[0])=={'fmnumber','nickname','fmstatus'})
     fields={'firstname':'Łucja','lastname':'Kowalska','nickname':'Żółwik','city':'Łódź','familyname':'Nowak','familycity':'Gdańsk','birthyear':'1984','gender':'2'}
     w.record('fragmented CP1250 write acknowledged with request sequence and own UIN',query(a,1,fields,True)[0]==[{'fmnumber':str(owner)}])
     own=query(a,2)[0][0];w.record('full own profile roundtrips',all(own[k]==v for k,v in fields.items()))
