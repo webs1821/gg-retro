@@ -1,6 +1,6 @@
 [package]
 name = "gg-server"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2024"
 description = "Serwer protokolu Gadu-Gadu 6.0"
 license = "MIS"

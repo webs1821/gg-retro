@@ -36,6 +36,7 @@ struct IndexQuery {
 #[template(path = "home.html")]
 struct HomeTemplate<'a> {
   online: usize,
+  registered: String,
   hostname: &'a str,
   version: &'a str,
   gg61_sha256: &'a str,
@@ -59,8 +60,19 @@ async fn index(
     return Ok(Html(template.render()?));
   }
 
+  let registered = match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+    .fetch_one(app_state.db_pool())
+    .await
+  {
+    Ok(count) => count.to_string(),
+    Err(error) => {
+      tracing::warn!(%error, "Could not count registered users");
+      "—".to_owned()
+    }
+  };
   let template = HomeTemplate {
     online: app_state.presence_hub().online(),
+    registered,
     hostname: app_state.config().hostname(),
     version: VERSION,
     gg61_sha256: GG61_SHA256,

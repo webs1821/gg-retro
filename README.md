@@ -8,6 +8,7 @@ Serwer dla oryginalnego Gadu-Gadu 6.0/6.1, oparty na [projekcie macbury](https:/
 
 Względem pierwotnego projektu macbury:
 
+- **Statystyki na stronie (0.8.3):** obok liczby osób online wyświetlana jest liczba wszystkich istniejących kont, niezależnie od obecności w katalogu publicznym. Licznik aktualizuje się przy odświeżeniu strony.
 - **Katalog publiczny (0.8.0, zgodność GG6 poprawiona w 0.8.1/0.8.2):** zapis i odczyt własnego profilu oraz wyszukiwanie osób z oryginalnego GG 6. Polskie znaki, klasyczne filtry, strony po 20 wyników i status respektujący niewidoczność oraz prywatność. Nowe i istniejące konta nie są automatycznie publikowane.
 - **Klient GG 6.1 (0.7.1):** wyłączony dawny aktualizator powodujący pytanie UAC o `update.tmp`; poprawione domyślne nazwy dźwięków na `sounds/wiadomosc.wav` i `sounds/dostepny.wav`. Gotowy EXE, instalator i patcher WWW korzystają z tych samych poprawek, z kontrolą SHA-256 oryginalnego klienta 6.1.0.158.
 - **Opisy offline (0.7.0):** opis „niedostępny” i opcjonalny czas powrotu są zachowywane po zamknięciu klienta oraz restarcie serwera, razem z blokadami i ustawieniami widoczności.
