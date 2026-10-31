@@ -926,7 +926,7 @@ version = "0.1.0"
 
 [[package]]
 name = "gg-server"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "ab_glyph",
  "askama",

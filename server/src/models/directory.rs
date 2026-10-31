@@ -108,7 +108,12 @@ async fn write(pool: &DatabasePool, uin: u32, fields: &BTreeMap<String, String>)
   }) {
     return Err(DirectoryError::Invalid);
   }
-  let mut p = read(pool, uin).await?;
+  // The original GG6 form submits a complete profile but omits blank fields.
+  // Starting from the previous row would silently retain values the user erased.
+  let mut p = Profile {
+    uin,
+    ..Default::default()
+  };
   for (key, slot) in [
     ("firstname", &mut p.firstname),
     ("lastname", &mut p.lastname),
@@ -166,7 +171,12 @@ pub async fn handle(
   request: DirectoryPacket,
 ) -> Result<DirectoryPacket> {
   let mut reply = DirectoryPacket {
-    kind: if request.kind == 3 { 5 } else { request.kind },
+    kind: match request.kind {
+      1 => 1, // WRITE success
+      2 => 3, // READ success (2 is WRITE failure in the original GG6 client)
+      3 => 5, // SEARCH success
+      _ => return Err(DirectoryError::Invalid),
+    },
     seq: request.seq,
     records: vec![],
   };

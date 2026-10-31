@@ -8,7 +8,7 @@ Serwer dla oryginalnego Gadu-Gadu 6.0/6.1, oparty na [projekcie macbury](https:/
 
 Względem pierwotnego projektu macbury:
 
-- **Katalog publiczny (0.8.0):** zapis i odczyt własnego profilu oraz wyszukiwanie osób z oryginalnego GG 6. Polskie znaki, klasyczne filtry, strony po 20 wyników i status respektujący niewidoczność oraz prywatność. Nowe i istniejące konta nie są automatycznie publikowane.
+- **Katalog publiczny (0.8.0, zgodność GG6 poprawiona w 0.8.1):** zapis i odczyt własnego profilu oraz wyszukiwanie osób z oryginalnego GG 6. Polskie znaki, klasyczne filtry, strony po 20 wyników i status respektujący niewidoczność oraz prywatność. Nowe i istniejące konta nie są automatycznie publikowane.
 - **Klient GG 6.1 (0.7.1):** wyłączony dawny aktualizator powodujący pytanie UAC o `update.tmp`; poprawione domyślne nazwy dźwięków na `sounds/wiadomosc.wav` i `sounds/dostepny.wav`. Gotowy EXE, instalator i patcher WWW korzystają z tych samych poprawek, z kontrolą SHA-256 oryginalnego klienta 6.1.0.158.
 - **Opisy offline (0.7.0):** opis „niedostępny” i opcjonalny czas powrotu są zachowywane po zamknięciu klienta oraz restarcie serwera, razem z blokadami i ustawieniami widoczności.
 - **Ponowne łączenie (0.7.0):** restart zamyka TCP bez pakietu wymuszonego wylogowania. Zmiana na „niedostępny” kończy sesję, a zalogowanie drugiego klienta nadal rozłącza poprzedni. Obecność jest publikowana dopiero po otrzymaniu listy kontaktów i prywatności.
@@ -38,7 +38,7 @@ Numery z oficjalnej sieci GG nie są automatycznie kontami na tym serwerze. Reje
 
 Uzupełnij i zapisz informacje o sobie w kliencie GG, aby pojawić się w katalogu tej instancji. Wyszukiwanie działa w oryginalnym oknie wyszukiwania osób. Nie wymaga nowego `gg.exe` i nie łączy się z katalogiem oficjalnej sieci GG.
 
-- Profil obejmuje imię, nazwisko, pseudonim, rok urodzenia, płeć, miejscowość oraz opcjonalnie nazwisko panieńskie i miejscowość pochodzenia. Częściowa aktualizacja zachowuje pozostałe pola. Wyczyszczenie wszystkich pól tekstowych i roku urodzenia usuwa profil z katalogu, także gdy formularz zachował wybór płci.
+- Profil obejmuje imię, nazwisko, pseudonim, rok urodzenia, płeć, miejscowość oraz opcjonalnie nazwisko panieńskie i miejscowość pochodzenia. Zapis zastępuje cały profil: GG6 pomija puste pola, więc pominięte wartości są usuwane. Wyczyszczenie wszystkich pól tekstowych i roku urodzenia usuwa profil z katalogu, także gdy formularz zachował wybór płci.
 - Szukaj po numerze, fragmentach imienia/pseudonimu/nazwiska/miejscowości, płci, roku lub przedziale lat oraz dostępności. Nazwisko panieńskie i miejscowość pochodzenia również są uwzględniane. Wielkość liter i polskie znaki nie utrudniają dopasowania (`Łódź` pasuje do `lodz`). Wyniki są uporządkowane po numerze, po 20 na stronę.
 - Zgodnie z klasycznym protokołem wyniki pokazują numer, imię, pseudonim, rok, miejscowość i stan. Nazwisko, płeć oraz dane pochodzenia służą dopasowaniu, ale ich wartości nie są odsyłane w wynikach. Pełny odczyt i edycja są możliwe wyłącznie dla własnego profilu. E-mail i nazwa z rejestracji nigdy nie są kopiowane do katalogu.
 - Wyszukiwanie wymaga zalogowania. Status „niewidoczny”, blokady, ukrywanie obecności i tryb „tylko dla znajomych” są respektowane także przez filtr dostępności. Sam publiczny profil pozostaje dostępny niezależnie od statusu. Limit sesji: 30 zapytań i 10 zapisów na minutę; przekroczenie kończy połączenie.

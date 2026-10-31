@@ -25,14 +25,24 @@ impl DirectoryPacket {
     }
     let kind = data[0];
     if !(if reply {
-      matches!(kind, 1 | 2 | 5)
+      // GG 6.1: WRITE ok/error=1/2, READ ok/error=3/4, SEARCH ok/error=5/6.
+      // In particular, READ success does not echo the request operation (2).
+      matches!(kind, 1..=6)
     } else {
       matches!(kind, 1..=3)
     }) {
       return Err(bad());
     }
     let seq = u32::from_le_bytes(data[1..5].try_into().unwrap());
-    if seq == 0 {
+    // GG 6.1 leaves READ/WRITE sequence bytes uninitialized. Echo them as-is;
+    // only SEARCH uses the sequence to dispatch the result to its window.
+    if seq == 0
+      && if reply {
+        matches!(kind, 5 | 6)
+      } else {
+        kind == 3
+      }
+    {
       return Err(bad());
     }
     let mut records = Vec::new();

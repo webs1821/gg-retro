@@ -7,14 +7,16 @@ import images_integration as images
 import wire_integration as w
 
 SEQ = 100
-def query(client, kind=3, fields=None, fragmented=False):
+def query(client, kind=3, fields=None, fragmented=False, sequence=None):
     global SEQ
     SEQ += 1
-    body=struct.pack('<BI',kind,SEQ)
+    seq=SEQ if sequence is None else sequence
+    body=struct.pack('<BI',kind,seq)
     for key,value in (fields or {}).items():body+=key.encode('ascii')+b'\0'+str(value).encode('cp1250')+b'\0'
     client.send(0x14,body,fragmented)
     data=client.until(0x0e)[1]
-    assert data[0]==(5 if kind==3 else kind) and struct.unpack('<I',data[1:5])[0]==SEQ
+    # Native GG 6.1.0.158: READ result is 3; 2 means failed WRITE, not READ.
+    assert data[0]=={1:1,2:3,3:5}[kind] and struct.unpack('<I',data[1:5])[0]==seq
     rows=[]
     # Empty values make split-on-double-NUL ambiguous; parse field/value pairs.
     offset=5;current={}
@@ -52,6 +54,8 @@ def main():
     w.record('new accounts are not automatically public',query(b)[0]==[] and query(b,fields={'FmNumber':owner})[0]==[])
     own=query(a,2)[0][0]
     w.record('own initially empty profile never exposes registration name or email',own['fmnumber']==str(owner) and own['firstname']=='' and 'email' not in own)
+    for seq in [0,0xffffffff]:
+        w.record('native GG6 READ accepts arbitrary sequence '+str(seq),query(a,2,sequence=seq)[0][0]['firstname']=='')
     fields={'firstname':'Łucja','lastname':'Kowalska','nickname':'Żółwik','city':'Łódź','familyname':'Nowak','familycity':'Gdańsk','birthyear':'1984','gender':'2'}
     w.record('fragmented CP1250 write acknowledged with request sequence and own UIN',query(a,1,fields,True)[0]==[{'fmnumber':str(owner)}])
     own=query(a,2)[0][0];w.record('full own profile roundtrips',all(own[k]==v for k,v in fields.items()))
@@ -84,11 +88,13 @@ def main():
     w.record('READ cannot fetch somebody elses private profile fields',True)
     c=images.Client(outsider);rejected(c,1,{'nickname':'X'*51})
     w.record('oversized profile is rejected atomically',w.dbquery('SELECT * FROM public_profiles')==before)
-    query(a,1,{'nickname':'Nowy Żółwik'})
-    w.record('partial edit preserves other profile fields',query(a,2)[0][0]['city']=='Łódź')
+    query(a,1,{'nickname':'Nowy Żółwik'},sequence=0)
+    own=query(a,2)[0][0]
+    w.record('native full-form WRITE clears omitted fields and accepts zero sequence',own['nickname']=='Nowy Żółwik' and all(own[k]=='' for k in ['firstname','lastname','city','familyname','familycity']) and own['birthyear']=='0' and own['gender']=='0')
     a.close();b.close();w.stop();w.start();a=images.Client(owner);b=images.Client(viewer)
     w.record('profile survives restart',query(a,2)[0][0]['nickname']=='Nowy Żółwik')
-    query(a,1,dict.fromkeys(fields,''))
+    # GG6 omits blank fields, and may retain a selected gender in an empty form.
+    query(a,1,{'gender':'2'})
     w.record('clearing profile removes it from public search',query(b,fields={'fmnumber':owner})[0]==[] and w.dbquery('SELECT count(*) FROM public_profiles')==[(0,)])
     # Populate many synthetic offline records directly for pagination, without
     # consuming public invitations or reconnecting hundreds of clients.

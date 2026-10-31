@@ -67,7 +67,7 @@ fn directory_rejects_malformed_bounded_fields_without_logging_values() {
     payload.extend_from_slice(body);
     assert!(DirectoryPacket::decode(&payload, false).is_err());
   }
-  for payload in [vec![1, 0, 0, 0, 0], vec![9, 1, 0, 0, 0], vec![3; 4097]] {
+  for payload in [vec![3, 0, 0, 0, 0], vec![9, 1, 0, 0, 0], vec![3; 4097]] {
     assert!(DirectoryPacket::decode(&payload, false).is_err());
   }
   let request = DirectoryPacket {
@@ -78,4 +78,38 @@ fn directory_rejects_malformed_bounded_fields_without_logging_values() {
   assert!(!format!("{:?}", GGPacket::DirectoryRequest(request)).contains("DO-NOT-LOG"));
   let mut frame = BytesMut::from(&[20, 0, 0, 0, 1, 16, 0, 0][..]);
   assert!(GGCodec::server().decode(&mut frame).is_err()); // Reject oversized headers immediately.
+}
+
+#[test]
+fn gg61_profile_replies_use_distinct_codes_and_accept_unset_sequences() {
+  // Native 6.1.0.158 dispatches reply 3 to its profile-read window. Reply 2
+  // goes to the write-failure handler, leaving "wczytywanie danych..." open.
+  // Its READ/WRITE constructors do not initialize the four sequence bytes.
+  for kind in [1, 2] {
+    let request = [kind, 0, 0, 0, 0];
+    assert_eq!(DirectoryPacket::decode(&request, false).unwrap().seq, 0);
+  }
+  for kind in 1..=6 {
+    let seq = if kind >= 5 { 1 } else { 0 };
+    let reply = DirectoryPacket {
+      kind,
+      seq,
+      records: vec![],
+    };
+    let mut wire = BytesMut::new();
+    GGCodec::server()
+      .encode(GGPacket::DirectoryReply(reply.clone()), &mut wire)
+      .unwrap();
+    assert_eq!(
+      &wire[..],
+      &[14, 0, 0, 0, 5, 0, 0, 0, kind, seq as u8, 0, 0, 0]
+    );
+    assert_eq!(
+      GGCodec::client().decode(&mut wire).unwrap(),
+      Some(GGPacket::DirectoryReply(reply))
+    );
+  }
+  for kind in [5, 6] {
+    assert!(DirectoryPacket::decode(&[kind, 0, 0, 0, 0], true).is_err());
+  }
 }
